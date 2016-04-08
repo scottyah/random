@@ -1,0 +1,103 @@
+package censored;
+
+import java.io.ByteArrayInputStream;
+import java.util.List;
+
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
+
+import org.apache.log4j.Logger;
+
+/**
+*  This is a STAX style parser
+*  
+*/
+
+public class STAXParser {
+
+    protected static Logger logger = Logger.getLogger(StopsLocParser.class);
+
+    /**
+     * takes a stream reader and list of strings, and returns the first element encountered's non-null value
+     *
+     * @param router.xml
+     * @throws
+     */
+    protected static String parse(byte[] byteArray, List<String> fieldsOfInterest) {
+
+        ByteArrayInputStream inputStream = new ByteArrayInputStream(byteArray);
+
+        String loc = null;
+        int eventType = 0;
+        boolean isFound = false;
+
+        try {
+            XMLStreamReader xmlr = XMLInputFactory.newInstance().createXMLStreamReader(inputStream);
+            while (xmlr.hasNext() && !isFound) {
+                eventType = xmlr.next();
+                
+                if (eventType == XMLStreamReader.START_ELEMENT && fieldsOfInterest.contains(xmlr.getLocalName())) {
+                    eventType = xmlr.next();
+                    
+                    if (eventType == XMLStreamReader.CHARACTERS) {
+                        loc = xmlr.getText().trim();
+                        
+                        if (!loc.isEmpty() && loc != null) {
+                            isFound = true;
+                            break;
+                        }
+                    } else{
+                        isFound = true;
+                        loc = null;
+                        break;
+                    }
+                }
+            }
+        } catch (XMLStreamException e) {
+            logger.error("Stax Parsing failed: ", e);
+            logger.error(inputStream.toString());
+        }
+        return loc;
+    }
+
+    /**
+     * takes a stream reader and string, and returns the first element encountered's non-null value
+     *
+     * @param  router.xml
+     * @throws
+     */
+    protected static String parse(byte[] byteArray, String fieldOfInterest) {
+
+        ByteArrayInputStream inputStream = new ByteArrayInputStream(byteArray);
+
+        String loc = null;
+        int eventType = 0;
+
+        try {
+            XMLStreamReader xmlr = XMLInputFactory.newInstance().createXMLStreamReader(inputStream);
+            while (xmlr.hasNext()) {
+                eventType = xmlr.next();
+                
+                if (eventType == XMLStreamReader.START_ELEMENT && fieldOfInterest.equals(xmlr.getLocalName())) {
+                    eventType = xmlr.next();
+                    
+                    if (eventType == XMLStreamReader.CHARACTERS) {
+                        loc = xmlr.getText().trim();
+                        
+                        if (!loc.isEmpty() && loc != null) {
+                            break;
+                        }
+                    } else{
+                        loc = null;
+                        break;
+                    }
+                }
+            }
+        } catch (XMLStreamException e) {
+            logger.error("Stax Parsing failed: ", e);
+        }
+        return loc;
+    }
+
+}
