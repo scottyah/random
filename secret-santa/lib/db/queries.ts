@@ -32,6 +32,17 @@ export function verifyPassword(plainPassword: string, hashedPassword: string): b
   return bcrypt.compareSync(plainPassword, hashedPassword)
 }
 
+export function updateUserPassword(userId: string, newPassword: string): void {
+  const db = getDatabase()
+  const passwordHash = bcrypt.hashSync(newPassword, 10)
+  const stmt = db.prepare(`
+    UPDATE users
+    SET password_hash = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `)
+  stmt.run(passwordHash, userId)
+}
+
 export function getAllUsers(): Profile[] {
   const db = getDatabase()
   const stmt = db.prepare('SELECT id, email, full_name, created_at, updated_at FROM users')
@@ -69,6 +80,35 @@ export function getAssignmentForUser(userId: string, year: number) {
       full_name: result.receiver_full_name,
       created_at: result.receiver_created_at,
       updated_at: result.receiver_updated_at,
+    },
+  }
+}
+
+export function getGiverForUser(userId: string, year: number) {
+  const db = getDatabase()
+  const stmt = db.prepare(`
+    SELECT
+      a.*,
+      u.id as giver_id,
+      u.email as giver_email,
+      u.full_name as giver_full_name
+    FROM assignments a
+    JOIN users u ON a.giver_id = u.id
+    WHERE a.receiver_id = ? AND a.year = ?
+  `)
+  const result = stmt.get(userId, year) as any
+
+  if (!result) return null
+
+  return {
+    id: result.id,
+    giver_id: result.giver_id,
+    receiver_id: result.receiver_id,
+    year: result.year,
+    giver: {
+      id: result.giver_id,
+      email: result.giver_email,
+      full_name: result.giver_full_name,
     },
   }
 }

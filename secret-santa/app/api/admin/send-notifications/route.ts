@@ -1,6 +1,14 @@
 import { NextResponse } from 'next/server'
 import { sendAssignmentEmail } from '@/lib/email'
-import { getAllAssignmentsForYear } from '@/lib/db/queries'
+import { getAllAssignmentsForYear, updateUserPassword } from '@/lib/db/queries'
+import { randomBytes } from 'crypto'
+
+/**
+ * Generates a random password
+ */
+function generateRandomPassword(): string {
+  return randomBytes(8).toString('base64').slice(0, 12)
+}
 
 /**
  * Admin endpoint to send assignment notification emails
@@ -20,14 +28,21 @@ export async function POST() {
       )
     }
 
-    // Send emails to all participants
+    // Send emails to all participants with new random passwords
     const emailResults = []
 
     for (const assignment of assignments) {
+      // Generate a new random password for this user
+      const newPassword = generateRandomPassword()
+
+      // Update the user's password in the database
+      updateUserPassword((assignment as any).giver_id, newPassword)
+
       const success = await sendAssignmentEmail(
         (assignment as any).giver_email,
         (assignment as any).giver_full_name,
-        (assignment as any).receiver_full_name
+        (assignment as any).receiver_full_name,
+        newPassword
       )
 
       emailResults.push({
@@ -38,7 +53,7 @@ export async function POST() {
 
     return NextResponse.json({
       success: true,
-      message: `Sent ${emailResults.length} notification emails (stubbed - check console)`,
+      message: `Sent ${emailResults.length} notification emails with new passwords (stubbed - check console)`,
       results: emailResults,
     })
   } catch (error) {

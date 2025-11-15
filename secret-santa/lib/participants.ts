@@ -20,21 +20,27 @@ export interface Couple {
  * Add or remove participants here
  */
 export const participants: Participant[] = [
-  { name: "Alice Johnson", email: "alice@example.com" },
-  { name: "Bob Smith", email: "bob@example.com" },
-  { name: "Carol Williams", email: "carol@example.com" },
-  { name: "David Brown", email: "david@example.com" },
-  { name: "Eve Davis", email: "eve@example.com" },
-  { name: "Frank Miller", email: "frank@example.com" },
+  { name: "Scott", email: "scotty.a.h@gmail.com" },
+  { name: "Keslyn", email: "keslynhatlen@gmail.com" },
+  { name: "Craig", email: "craig.hatlen@gmail.com" },
+  { name: "Susan", email: "hats4fun@gmail.com" },
+  { name: "Andrea", email: "a.hatlen@yahoo.com" },
+  { name: "Jose", email: "jose.mps88@gmail.com" },
+  { name: "Brad", email: "Brad_wilson_12@yahoo.com" },
+  { name: "Dani", email: "hatlen.danielle@gmail.com" },
+  { name: "Sue", email: "suejoetami@sbcglobal.net" },
 ]
+
 
 /**
  * List of couples who should not be assigned to each other
  * Add or remove couples here
  */
 export const couples: Couple[] = [
-  { person1Email: "alice@example.com", person2Email: "bob@example.com" },
-  { person1Email: "carol@example.com", person2Email: "david@example.com" },
+  { person1Email: "scotty.a.h@gmail.com", person2Email: "keslynhatlen@gmail.com" },
+  { person1Email: "craig.hatlen@gmail.com", person2Email: "hats4fun@gmail.com" },
+  { person1Email: "a.hatlen@yahoo.com", person2Email: "jose.mps88@gmail.com" },
+  { person1Email: "Brad_wilson _12@yahoo.com", person2Email: "hatlen.danielle@gmail.com" },
 ]
 
 /**

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { WishlistItem } from '@/lib/types'
 
 interface WishlistEditorProps {
@@ -10,22 +10,29 @@ interface WishlistEditorProps {
 }
 
 export default function WishlistEditor({
-  wishlist,
+  wishlist: initialWishlist,
   userId,
   onRefresh,
 }: WishlistEditorProps) {
+  const [wishlist, setWishlist] = useState(initialWishlist)
   const [isAdding, setIsAdding] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [formData, setFormData] = useState({
     title: '',
     description: '',
-    price: '',
     url: '',
   })
   const [loading, setLoading] = useState(false)
+  const [notifyLoading, setNotifyLoading] = useState(false)
+  const [notifySuccess, setNotifySuccess] = useState(false)
+
+  // Sync with props when they change
+  useEffect(() => {
+    setWishlist(initialWishlist)
+  }, [initialWishlist])
 
   const resetForm = () => {
-    setFormData({ title: '', description: '', price: '', url: '' })
+    setFormData({ title: '', description: '', url: '' })
     setIsAdding(false)
     setEditingId(null)
   }
@@ -34,21 +41,43 @@ export default function WishlistEditor({
     e.preventDefault()
     setLoading(true)
 
+    // Create optimistic item with temporary ID
+    const tempId = `temp-${Date.now()}`
+    const optimisticItem: WishlistItem = {
+      id: tempId,
+      user_id: userId,
+      title: formData.title,
+      description: formData.description || null,
+      price: null,
+      url: formData.url || null,
+      is_purchased: false,
+      purchased_by: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+
+    // Optimistically add to UI
+    setWishlist([optimisticItem, ...wishlist])
+    resetForm()
+
     try {
       const response = await fetch('/api/wishlist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: formData.title,
-          description: formData.description || null,
-          price: formData.price ? parseFloat(formData.price) : null,
-          url: formData.url || null,
+          title: optimisticItem.title,
+          description: optimisticItem.description,
+          price: null,
+          url: optimisticItem.url,
         }),
       })
 
-      if (!response.ok) throw new Error('Failed to add item')
+      if (!response.ok) {
+        // Revert on error
+        setWishlist(wishlist.filter(item => item.id !== tempId))
+        throw new Error('Failed to add item')
+      }
 
-      resetForm()
       onRefresh()
     } catch (error) {
       console.error('Error adding item:', error)
@@ -71,7 +100,7 @@ export default function WishlistEditor({
         body: JSON.stringify({
           title: formData.title,
           description: formData.description || null,
-          price: formData.price ? parseFloat(formData.price) : null,
+          price: null,
           url: formData.url || null,
         }),
       })
@@ -91,12 +120,20 @@ export default function WishlistEditor({
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this item?')) return
 
+    // Optimistically remove item from UI
+    const previousWishlist = wishlist
+    setWishlist(wishlist.filter(item => item.id !== id))
+
     try {
       const response = await fetch(`/api/wishlist/${id}`, {
         method: 'DELETE',
       })
 
-      if (!response.ok) throw new Error('Failed to delete item')
+      if (!response.ok) {
+        // Revert on error
+        setWishlist(previousWishlist)
+        throw new Error('Failed to delete item')
+      }
 
       onRefresh()
     } catch (error) {
@@ -110,10 +147,31 @@ export default function WishlistEditor({
     setFormData({
       title: item.title,
       description: item.description || '',
-      price: item.price?.toString() || '',
       url: item.url || '',
     })
     setIsAdding(false)
+  }
+
+  const handleNotifyGifter = async () => {
+    setNotifyLoading(true)
+    try {
+      const response = await fetch('/api/wishlist/notify-gifter', {
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const data = await response.json()
+        throw new Error(data.error || 'Failed to notify gifter')
+      }
+
+      setNotifySuccess(true)
+      setTimeout(() => setNotifySuccess(false), 5000)
+    } catch (error) {
+      console.error('Error notifying gifter:', error)
+      alert('Failed to notify your Secret Santa. Please try again.')
+    } finally {
+      setNotifyLoading(false)
+    }
   }
 
   return (
@@ -121,20 +179,39 @@ export default function WishlistEditor({
       {/* Header */}
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-semibold text-gray-900">My Wishlist</h2>
-        {!isAdding && !editingId && (
-          <button
-            onClick={() => setIsAdding(true)}
-            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition"
-          >
-            + Add Item
-          </button>
-        )}
+        <div className="flex gap-2">
+          {!isAdding && !editingId && wishlist.length > 0 && (
+            <button
+              onClick={handleNotifyGifter}
+              disabled={notifyLoading || notifySuccess}
+              className={`px-4 py-2 rounded-lg transition disabled:opacity-50 ${
+                notifySuccess
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+              }`}
+            >
+              {notifyLoading
+                ? 'Sending...'
+                : notifySuccess
+                ? '✓ Notified!'
+                : '✉️ Notify My Santa'}
+            </button>
+          )}
+          {!isAdding && !editingId && (
+            <button
+              onClick={() => setIsAdding(true)}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition"
+            >
+              + Add Item
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Add/Edit Form */}
       {(isAdding || editingId) && (
-        <div className="bg-white rounded-lg shadow-md p-6">
-          <h3 className="text-lg font-semibold mb-4">
+        <div className="bg-gray-100/90 backdrop-blur-sm rounded-lg shadow-md p-6 border border-gray-300">
+          <h3 className="text-lg font-semibold mb-4 text-gray-900">
             {editingId ? 'Edit Item' : 'Add New Item'}
           </h3>
           <form onSubmit={editingId ? handleUpdate : handleAdd} className="space-y-4">
@@ -167,21 +244,6 @@ export default function WishlistEditor({
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Price (optional)
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={formData.price}
-                onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                placeholder="0.00"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
                 URL (optional)
               </label>
               <input
@@ -197,14 +259,14 @@ export default function WishlistEditor({
               <button
                 type="submit"
                 disabled={loading}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition disabled:opacity-50"
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition disabled:opacity-50"
               >
                 {loading ? 'Saving...' : editingId ? 'Update' : 'Add'}
               </button>
               <button
                 type="button"
                 onClick={resetForm}
-                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition"
+                className="px-4 py-2 bg-gray-300 hover:bg-gray-400 text-gray-700 rounded-lg transition"
               >
                 Cancel
               </button>
@@ -215,55 +277,49 @@ export default function WishlistEditor({
 
       {/* Wishlist Items */}
       {wishlist.length === 0 ? (
-        <div className="bg-white rounded-lg shadow-md p-8 text-center">
+        <div className="bg-gray-100/90 backdrop-blur-sm rounded-lg shadow-md p-8 text-center border border-gray-300">
           <p className="text-gray-500">
             Your wishlist is empty. Add some items to help your Secret Santa!
           </p>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-4">
           {wishlist.map((item) => (
             <div
               key={item.id}
-              className="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition"
+              className="bg-gray-100/90 backdrop-blur-sm rounded-lg shadow-sm p-4 hover:shadow-md transition border border-gray-300"
             >
-              <div className="flex justify-between items-start mb-3">
-                <h3 className="text-lg font-semibold text-gray-900">{item.title}</h3>
-                {item.price && (
-                  <span className="text-lg font-bold text-green-600">
-                    ${item.price.toFixed(2)}
-                  </span>
-                )}
-              </div>
-
-              {item.description && (
-                <p className="text-gray-600 text-sm mb-3">{item.description}</p>
-              )}
-
-              {item.url && (
-                <a
-                  href={item.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-blue-600 hover:underline block mb-3"
-                >
-                  View Product →
-                </a>
-              )}
-
-              <div className="flex gap-2 mt-4">
-                <button
-                  onClick={() => startEdit(item)}
-                  className="px-3 py-1 text-sm bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => handleDelete(item.id)}
-                  className="px-3 py-1 text-sm bg-red-100 hover:bg-red-200 text-red-700 rounded transition"
-                >
-                  Delete
-                </button>
+              <div className="flex justify-between items-start gap-4">
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-semibold text-green-900">{item.title}</h3>
+                  {item.description && (
+                    <p className="text-green-700 text-sm mt-1">{item.description}</p>
+                  )}
+                  {item.url && (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-blue-600 hover:underline mt-1 inline-block"
+                    >
+                      View Product →
+                    </a>
+                  )}
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button
+                    onClick={() => startEdit(item)}
+                    className="px-2 py-1 text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleDelete(item.id)}
+                    className="px-2 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded transition"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             </div>
           ))}

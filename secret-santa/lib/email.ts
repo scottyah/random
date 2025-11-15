@@ -16,11 +16,9 @@ export interface EmailParams {
  * Sends an email (STUBBED - logs to console instead)
  */
 export async function sendEmail(params: EmailParams): Promise<boolean> {
-  console.log('📧 [EMAIL STUB] Would send email:')
-  console.log('To:', params.to)
-  console.log('Subject:', params.subject)
-  console.log('Content:')
-  console.log(params.text || params.html)
+  // Only log that an email was sent, NOT the content (to protect assignment privacy)
+  console.log(`📧 [EMAIL STUB] Email sent to: ${params.to}`)
+  console.log(`   Subject: ${params.subject}`)
   console.log('---')
 
   // Simulate successful send
@@ -33,15 +31,36 @@ export async function sendEmail(params: EmailParams): Promise<boolean> {
 export async function sendAssignmentEmail(
   recipientEmail: string,
   recipientName: string,
-  assignedPersonName: string
+  assignedPersonName: string,
+  password?: string
 ): Promise<boolean> {
   const subject = '🎅 Your Secret Santa Assignment!'
+
+  const loginInfo = password
+    ? `
+    <p><strong>Your login credentials:</strong></p>
+    <p>Email: ${recipientEmail}<br>
+    Password: <code>${password}</code></p>
+    <p>You can change your password after logging in.</p>
+    `
+    : ''
+
+  const loginInfoText = password
+    ? `
+Your login credentials:
+Email: ${recipientEmail}
+Password: ${password}
+
+You can change your password after logging in.
+`
+    : ''
 
   const html = `
     <h1>Ho Ho Ho! 🎅</h1>
     <p>Hi ${recipientName},</p>
     <p>You have been assigned to be the Secret Santa for:</p>
     <h2 style="color: #ff0000;">${assignedPersonName}</h2>
+    ${loginInfo}
     <p>Log in to the Secret Santa app to see their wishlist and start shopping!</p>
     <p>Remember to keep it a secret! 🤫</p>
     <br>
@@ -52,7 +71,7 @@ export async function sendAssignmentEmail(
     Hi ${recipientName},
 
     You have been assigned to be the Secret Santa for: ${assignedPersonName}
-
+    ${loginInfoText}
     Log in to the Secret Santa app to see their wishlist and start shopping!
 
     Remember to keep it a secret!
@@ -143,6 +162,42 @@ export async function sendWishlistReminderEmail(
 
   return sendEmail({
     to: email,
+    subject,
+    html,
+    text,
+  })
+}
+
+/**
+ * Sends notification to gifter that their recipient's wishlist is ready
+ */
+export async function sendWishlistReadyEmail(
+  gifterEmail: string,
+  gifterName: string,
+  recipientName: string
+): Promise<boolean> {
+  const subject = `🎁 ${recipientName}'s Wishlist is Ready!`
+
+  const html = `
+    <h1>Great news! 🎄</h1>
+    <p>Hi ${gifterName},</p>
+    <p><strong>${recipientName}</strong> has finished updating their wishlist!</p>
+    <p>Log in to the Secret Santa app to see what they're hoping for this year.</p>
+    <p>Happy shopping! 🛍️</p>
+  `
+
+  const text = `
+    Hi ${gifterName},
+
+    Great news! ${recipientName} has finished updating their wishlist!
+
+    Log in to the Secret Santa app to see what they're hoping for this year.
+
+    Happy shopping!
+  `
+
+  return sendEmail({
+    to: gifterEmail,
     subject,
     html,
     text,

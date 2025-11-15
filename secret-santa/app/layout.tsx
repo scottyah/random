@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import Snowfall from "@/components/Snowfall";
+import FallingTrees from "@/components/FallingTrees";
 
 export const metadata: Metadata = {
   title: "Secret Santa - Gift Exchange Manager",
@@ -14,6 +16,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
+        <FallingTrees />
+        <Snowfall />
         {children}
       </body>
     </html>
