@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { participants } from '@/lib/participants'
 import {
   generateSecretSantaAssignments,
   validateAssignments,
 } from '@/lib/secret-santa-algorithm'
+import { getUserByEmail, createAssignment, deleteAssignmentsForYear } from '@/lib/db/queries'
 
 /**
  * Admin endpoint to generate Secret Santa assignments
@@ -12,8 +12,6 @@ import {
  */
 export async function POST() {
   try {
-    const supabase = await createClient()
-
     // Generate assignments using the algorithm
     const assignments = generateSecretSantaAssignments(participants)
 
@@ -37,61 +35,33 @@ export async function POST() {
     const year = new Date().getFullYear()
 
     // Delete existing assignments for this year
-    const { error: deleteError } = await supabase
-      .from('assignments')
-      .delete()
-      .eq('year', year)
-
-    if (deleteError) {
-      console.error('Error deleting old assignments:', deleteError)
-    }
+    deleteAssignmentsForYear(year)
 
     // Store assignments in database
-    const assignmentRecords = []
+    const savedAssignments = []
 
     for (const assignment of assignments) {
-      // Get profile IDs for giver and receiver
-      const { data: giverProfile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('email', assignment.giver.email)
-        .single()
+      // Get user IDs for giver and receiver
+      const giver = getUserByEmail(assignment.giver.email)
+      const receiver = getUserByEmail(assignment.receiver.email)
 
-      const { data: receiverProfile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('email', assignment.receiver.email)
-        .single()
-
-      if (giverProfile && receiverProfile) {
-        assignmentRecords.push({
-          giver_id: giverProfile.id,
-          receiver_id: receiverProfile.id,
-          year,
+      if (giver && receiver) {
+        createAssignment(giver.id, receiver.id, year)
+        savedAssignments.push({
+          giver: assignment.giver.name,
+          receiver: assignment.receiver.name,
         })
+      } else {
+        console.warn(
+          `Could not create assignment: ${assignment.giver.email} -> ${assignment.receiver.email}. Users not found.`
+        )
       }
-    }
-
-    // Insert all assignments
-    const { data, error } = await supabase
-      .from('assignments')
-      .insert(assignmentRecords)
-      .select()
-
-    if (error) {
-      return NextResponse.json(
-        { error: 'Failed to save assignments', details: error },
-        { status: 500 }
-      )
     }
 
     return NextResponse.json({
       success: true,
-      message: `Generated ${assignments.length} Secret Santa assignments for ${year}`,
-      assignments: assignments.map((a) => ({
-        giver: a.giver.name,
-        receiver: a.receiver.name,
-      })),
+      message: `Generated ${savedAssignments.length} Secret Santa assignments for ${year}`,
+      assignments: savedAssignments,
     })
   } catch (error) {
     console.error('Error generating assignments:', error)

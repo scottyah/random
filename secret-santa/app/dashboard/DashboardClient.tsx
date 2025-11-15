@@ -2,7 +2,6 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
 import { AssignmentWithReceiver, WishlistItem, Profile } from '@/lib/types'
 import WishlistEditor from '@/components/WishlistEditor'
 import TargetWishlist from '@/components/TargetWishlist'
@@ -28,8 +27,7 @@ export default function DashboardClient({
   const [activeTab, setActiveTab] = useState<'target' | 'my-wishlist'>('target')
 
   const handleSignOut = async () => {
-    const supabase = createClient()
-    await supabase.auth.signOut()
+    await fetch('/api/auth/logout', { method: 'POST' })
     router.push('/login')
     router.refresh()
   }

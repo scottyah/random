@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { WishlistItem } from '@/lib/types'
 
 interface TargetWishlistProps {
@@ -21,25 +20,15 @@ export default function TargetWishlist({
     setLoading(item.id)
 
     try {
-      const supabase = createClient()
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-
-      if (!user) {
-        alert('You must be logged in')
-        return
-      }
-
-      const { error } = await supabase
-        .from('wishlist_items')
-        .update({
+      const response = await fetch(`/api/wishlist/${item.id}/purchase`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           is_purchased: !item.is_purchased,
-          purchased_by: !item.is_purchased ? user.id : null,
-        })
-        .eq('id', item.id)
+        }),
+      })
 
-      if (error) throw error
+      if (!response.ok) throw new Error('Failed to update item')
 
       onRefresh()
     } catch (error) {

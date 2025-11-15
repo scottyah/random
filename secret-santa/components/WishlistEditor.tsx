@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { WishlistItem } from '@/lib/types'
 
 interface WishlistEditorProps {
@@ -36,16 +35,18 @@ export default function WishlistEditor({
     setLoading(true)
 
     try {
-      const supabase = createClient()
-      const { error } = await supabase.from('wishlist_items').insert({
-        user_id: userId,
-        title: formData.title,
-        description: formData.description || null,
-        price: formData.price ? parseFloat(formData.price) : null,
-        url: formData.url || null,
+      const response = await fetch('/api/wishlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: formData.title,
+          description: formData.description || null,
+          price: formData.price ? parseFloat(formData.price) : null,
+          url: formData.url || null,
+        }),
       })
 
-      if (error) throw error
+      if (!response.ok) throw new Error('Failed to add item')
 
       resetForm()
       onRefresh()
@@ -64,18 +65,18 @@ export default function WishlistEditor({
     setLoading(true)
 
     try {
-      const supabase = createClient()
-      const { error } = await supabase
-        .from('wishlist_items')
-        .update({
+      const response = await fetch(`/api/wishlist/${editingId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           title: formData.title,
           description: formData.description || null,
           price: formData.price ? parseFloat(formData.price) : null,
           url: formData.url || null,
-        })
-        .eq('id', editingId)
+        }),
+      })
 
-      if (error) throw error
+      if (!response.ok) throw new Error('Failed to update item')
 
       resetForm()
       onRefresh()
@@ -91,13 +92,11 @@ export default function WishlistEditor({
     if (!confirm('Are you sure you want to delete this item?')) return
 
     try {
-      const supabase = createClient()
-      const { error } = await supabase
-        .from('wishlist_items')
-        .delete()
-        .eq('id', id)
+      const response = await fetch(`/api/wishlist/${id}`, {
+        method: 'DELETE',
+      })
 
-      if (error) throw error
+      if (!response.ok) throw new Error('Failed to delete item')
 
       onRefresh()
     } catch (error) {
