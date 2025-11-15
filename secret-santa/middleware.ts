@@ -1,50 +1,48 @@
-import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { getIronSession, SessionOptions } from 'iron-session'
+import { cookies } from 'next/headers'
+
+interface SessionData {
+  userId?: string
+  isLoggedIn: boolean
+}
+
+const sessionOptions: SessionOptions = {
+  password: process.env.SESSION_SECRET || 'complex_password_at_least_32_characters_long',
+  cookieName: 'secret-santa-session',
+  cookieOptions: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'lax' as const,
+    maxAge: 60 * 60 * 24 * 7, // 1 week
+  },
+}
 
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({
-    request,
-  })
+  const cookieStore = await cookies()
+  const session = await getIronSession<SessionData>(cookieStore, sessionOptions)
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll()
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value))
-          supabaseResponse = NextResponse.next({
-            request,
-          })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
-        },
-      },
-    }
-  )
+  const isLoggedIn = session.isLoggedIn && session.userId
 
-  // Refresh session if expired
-  const { data: { user } } = await supabase.auth.getUser()
+  // Public routes that don't require authentication
+  const publicPaths = ['/login', '/api/auth/login', '/api/auth/logout']
+  const isPublicPath = publicPaths.some((path) => request.nextUrl.pathname.startsWith(path))
 
   // Redirect to login if user is not authenticated and trying to access protected routes
-  if (!user && !request.nextUrl.pathname.startsWith('/login')) {
+  if (!isLoggedIn && !isPublicPath) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
   }
 
   // Redirect to dashboard if user is authenticated and trying to access login
-  if (user && request.nextUrl.pathname === '/login') {
+  if (isLoggedIn && request.nextUrl.pathname === '/login') {
     const url = request.nextUrl.clone()
     url.pathname = '/dashboard'
     return NextResponse.redirect(url)
   }
 
-  return supabaseResponse
+  return NextResponse.next()
 }
 
 export const config = {

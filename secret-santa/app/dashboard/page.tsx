@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { getCurrentUser } from '@/lib/session'
+import { getUserById, getAssignmentForUser, getWishlistForUser } from '@/lib/db/queries'
 import { AssignmentWithReceiver, WishlistItem, Profile } from '@/lib/types'
 import DashboardClient from './DashboardClient'
 
@@ -12,23 +13,14 @@ async function getDaysRemaining(): Promise<number> {
 }
 
 export default async function DashboardPage() {
-  const supabase = await createClient()
+  const userId = await getCurrentUser()
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  if (!user) {
+  if (!userId) {
     redirect('/login')
   }
 
   // Get user's profile
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', user.id)
-    .single()
+  const profile = getUserById(userId)
 
   if (!profile) {
     return <div>Profile not found</div>
@@ -38,34 +30,16 @@ export default async function DashboardPage() {
   const year = new Date().getFullYear()
 
   // Get user's assignment (who they are giving to)
-  const { data: assignment } = await supabase
-    .from('assignments')
-    .select(`
-      *,
-      receiver:profiles!assignments_receiver_id_fkey(*)
-    `)
-    .eq('giver_id', user.id)
-    .eq('year', year)
-    .single()
+  const assignment = getAssignmentForUser(userId, year)
 
   // Get target's wishlist if assignment exists
   let targetWishlist: WishlistItem[] = []
   if (assignment) {
-    const { data: wishlist } = await supabase
-      .from('wishlist_items')
-      .select('*')
-      .eq('user_id', (assignment.receiver as any).id)
-      .order('created_at', { ascending: false })
-
-    targetWishlist = wishlist || []
+    targetWishlist = getWishlistForUser(assignment.receiver.id)
   }
 
   // Get user's own wishlist
-  const { data: myWishlist } = await supabase
-    .from('wishlist_items')
-    .select('*')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false })
+  const myWishlist = getWishlistForUser(userId)
 
   const daysRemaining = await getDaysRemaining()
 
@@ -74,7 +48,7 @@ export default async function DashboardPage() {
       profile={profile as Profile}
       assignment={assignment as AssignmentWithReceiver | null}
       targetWishlist={targetWishlist}
-      myWishlist={myWishlist || []}
+      myWishlist={myWishlist}
       daysRemaining={daysRemaining}
     />
   )

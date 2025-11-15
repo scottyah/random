@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { sendAssignmentEmail } from '@/lib/email'
+import { getAllAssignmentsForYear } from '@/lib/db/queries'
 
 /**
  * Admin endpoint to send assignment notification emails
@@ -8,25 +8,10 @@ import { sendAssignmentEmail } from '@/lib/email'
  */
 export async function POST() {
   try {
-    const supabase = await createClient()
     const year = new Date().getFullYear()
 
     // Get all assignments with profile data
-    const { data: assignments, error } = await supabase
-      .from('assignments')
-      .select(`
-        *,
-        giver:profiles!assignments_giver_id_fkey(id, email, full_name),
-        receiver:profiles!assignments_receiver_id_fkey(id, email, full_name)
-      `)
-      .eq('year', year)
-
-    if (error) {
-      return NextResponse.json(
-        { error: 'Failed to fetch assignments', details: error },
-        { status: 500 }
-      )
-    }
+    const assignments = getAllAssignmentsForYear(year)
 
     if (!assignments || assignments.length === 0) {
       return NextResponse.json(
@@ -39,17 +24,14 @@ export async function POST() {
     const emailResults = []
 
     for (const assignment of assignments) {
-      const giver = assignment.giver as any
-      const receiver = assignment.receiver as any
-
       const success = await sendAssignmentEmail(
-        giver.email,
-        giver.full_name,
-        receiver.full_name
+        (assignment as any).giver_email,
+        (assignment as any).giver_full_name,
+        (assignment as any).receiver_full_name
       )
 
       emailResults.push({
-        to: giver.email,
+        to: (assignment as any).giver_email,
         success,
       })
     }
