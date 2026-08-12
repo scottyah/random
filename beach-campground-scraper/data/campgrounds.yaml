@@ -1,0 +1,136 @@
+# Curated campground data for North County San Diego beach camping.
+#
+# All four are California State Parks, so they share the ReserveCalifornia
+# (UseDirect) booking backend and one provider handles all of them.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# IMPORTANT: place_id / facility_id are intentionally null.
+#
+# These were NOT verified against the live API (the authoring environment's
+# egress policy blocked calirdr.usedirect.com), and a wrong hardcoded ID
+# silently scans the wrong campground. Populate them for real with:
+#
+#     python -m campscout discover --write
+#
+# which queries the API from your server and writes back the true IDs.
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Desirability tiers are matched FIRST-MATCH-WINS, so list them best-first.
+# The `geo` rule auto-detects the oceanfront row from real site coordinates
+# once `discover` has cached them; it only ever raises a score, so any tier
+# you hand-curate stays authoritative.
+
+campgrounds:
+  - key: san_elijo
+    name: San Elijo State Beach
+    park: San Elijo SB
+    city: Cardiff-by-the-Sea, Encinitas
+    enabled: true
+    place_id: null
+    facility_id: null
+    park_url: https://www.parks.ca.gov/SanElijo
+    map_url: https://www.parks.ca.gov/pages/662/files/SanElijoSB_CampMap.pdf
+    notes: >
+      ~170 sites on a low bluff directly above the sand, with wooden
+      staircases down to the beach. The bluff-edge row has unobstructed
+      water views; the inland row backs onto Old Highway 101 and gets
+      road noise. Books out months ahead — cancellations are the realistic
+      way in.
+    desirability:
+      default: 15
+      tiers:
+        - score: 100
+          label: bluff-front, north section
+          sites: "145-171"
+        - score: 90
+          label: ocean side, main section
+          sites: "1-43"
+        - score: 75
+          label: ocean side, outer row
+          sites: "47,49,51,54,56"
+        - score: 45
+          label: full hookup, inland
+          sites: "101-108,111-116"
+      exclude:
+        # 94 is hike-and-bike, 128 is the Grunion Run group site: neither is
+        # a normal two-party booking.
+        sites: "94,128"
+      geo:
+        mode: west_percentile
+        percentile: 35
+        score: 95
+        label: oceanfront row (auto-detected from coordinates)
+    adjacency:
+      mode: either
+      max_meters: 35
+      groups:
+        - "1-43"
+        - "44-99"
+        - "101-144"
+        - "145-171"
+
+  - key: south_carlsbad
+    name: South Carlsbad State Beach
+    park: South Carlsbad SB
+    city: Carlsbad
+    enabled: true
+    place_id: null
+    facility_id: null
+    park_url: https://www.parks.ca.gov/?page_id=660
+    map_url: https://www.parks.ca.gov/pages/660/files/SouthCarlsbadSB_CampMap020415.pdf
+    notes: >
+      ~220 sites in a long linear strip on the bluff, roughly 30 minutes
+      north of downtown San Diego. Premium oceanfront sites and inland
+      sites are separated by the park road. More sand at North Ponto and
+      South Ponto at either end.
+      Site-number ranges here are NOT hand-verified — the geo rule below
+      classifies the oceanfront row from real coordinates instead, which is
+      reliable for a strip campground like this one. Run `campscout sites
+      south_carlsbad` to see the true roster and add tiers if you want.
+    desirability:
+      default: 20
+      geo:
+        mode: west_percentile
+        percentile: 40
+        score: 100
+        label: oceanfront row (auto-detected from coordinates)
+    adjacency:
+      # Numbering runs the length of the strip, so consecutive numbers are
+      # genuine neighbours; geo confirms it when coordinates are available.
+      mode: either
+      max_meters: 35
+
+  - key: san_onofre_bluffs
+    name: San Onofre State Beach — Bluffs Campground
+    park: San Onofre SB
+    city: San Clemente (north county line)
+    enabled: true
+    place_id: null
+    facility_id: null
+    park_url: https://www.parks.ca.gov/sanonofre/
+    notes: >
+      175 sites strung along old US-101 on the sandstone bluff, with six
+      trails down to the beach. No hookups, chemical toilets, cold outdoor
+      showers — more rustic than the state beaches to the south. Online
+      reservations run mid-March through mid-September; first-come the rest
+      of the year, when this scraper will correctly find nothing.
+    desirability:
+      default: 30
+      geo:
+        mode: west_percentile
+        percentile: 50
+        score: 90
+        label: bluff-side (auto-detected from coordinates)
+    adjacency:
+      mode: either
+      max_meters: 40
+
+  - key: san_elijo_group
+    name: San Elijo State Beach — Grunion Run group site
+    park: San Elijo SB
+    city: Cardiff-by-the-Sea, Encinitas
+    # Single group site (#128): there is no "adjacent pair" to find here.
+    # Left in place as documentation of why it is excluded above.
+    enabled: false
+    place_id: null
+    facility_id: null

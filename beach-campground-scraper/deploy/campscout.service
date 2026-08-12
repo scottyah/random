@@ -1,0 +1,22 @@
+[Unit]
+Description=campscout - watch North County SD beach campgrounds for adjacent open sites
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/campscout
+ExecStart=/srv/campscout/.venv/bin/python -m campscout scan
+
+# Secrets belong here, not in config.yaml.
+# EnvironmentFile=/etc/campscout.env
+
+# The scraper only needs to read its own directory and write data/.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/campscout/data
+
+[Install]
+WantedBy=multi-user.target

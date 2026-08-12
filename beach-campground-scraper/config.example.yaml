@@ -1,0 +1,71 @@
+# Copy to config.yaml and edit. config.yaml is gitignored (it holds secrets).
+#
+#   cp config.example.yaml config.yaml
+#
+# Anything here overlays data/campgrounds.yaml, matched on `key`.
+# ${ENV_VAR} is expanded from the environment, so keep real secrets in env.
+
+search:
+  # Only alert on pairs where BOTH sites score at least this.
+  # 100 = bluff-front, 90 = ocean side, 45 = inland hookups, 15-30 = the rest.
+  min_score: 85
+
+  # How far ahead to look. ReserveCalifornia opens bookings 6 months out,
+  # so past ~180 days there is nothing to find.
+  horizon_days: 180
+
+  windows:
+    # Weekday numbers are Mon=0 ... Sun=6.
+    - label: weekend
+      nights: 2
+      weekdays: [4]          # Friday check-in, Fri+Sat nights
+
+    - label: long weekend
+      nights: 3
+      weekdays: [4]
+
+    # A specific trip you actually care about:
+    # - label: labor day
+    #   checkin: '2026-09-04'
+    #   nights: 3
+
+# Seconds between polls in `watch` mode. Cancellations surface at random, but
+# be a good citizen: 600s (10 min) is plenty and stays far below anything that
+# looks like abuse. Do not drop this below ~120.
+poll_seconds: 600
+
+# Don't re-alert on the same pair+dates within this many hours.
+cooldown_hours: 12
+
+request:
+  timeout: 30
+  min_interval: 1.0        # seconds between API calls
+  max_retries: 3
+
+notifiers:
+  - type: console
+    enabled: true
+
+  # Phone push, no account needed. Pick an unguessable topic name and
+  # subscribe to it in the ntfy app.
+  # - type: ntfy
+  #   topic: sd-beach-camping-${USER}-9f3a2b
+  #   priority: high
+
+  # - type: email
+  #   host: smtp.gmail.com
+  #   port: 587
+  #   username: you@gmail.com
+  #   password: ${SMTP_APP_PASSWORD}    # Gmail app password, not your login
+  #   sender: you@gmail.com
+  #   recipients:
+  #     - you@gmail.com
+
+  # - type: webhook
+  #   url: ${SLACK_WEBHOOK_URL}
+  #   template: slack        # or: discord
+
+# Per-campground overrides. `discover --write` fills the IDs in here.
+campgrounds:
+  - key: san_onofre_bluffs
+    enabled: false           # rustic; turn on if you want it

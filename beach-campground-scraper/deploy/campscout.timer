@@ -1,0 +1,12 @@
+[Unit]
+Description=Run campscout every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+# Spread the load so we're not hitting the API exactly on the minute.
+RandomizedDelaySec=90
+Persistent=true
+
+[Install]
+WantedBy=timers.target
