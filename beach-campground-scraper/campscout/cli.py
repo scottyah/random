@@ -15,6 +15,7 @@ from typing import Optional
 import yaml
 
 from .config import DEFAULT_CAMPGROUNDS, Config, load_config
+from .heartbeat import build_heartbeat
 from .models import PairHit
 from .notify import build_notifiers, dispatch, format_body, format_subject
 from .providers import ReserveCalifornia, ReserveCaliforniaError
@@ -282,29 +283,70 @@ def cmd_sites(args: argparse.Namespace, config: Config) -> int:
 
 
 def _run_once(config: Config, notifiers, state: AlertState, dry_run: bool) -> list[PairHit]:
-    hits = scan(config)
-    if not hits:
-        log.info("no adjacent desirable pairs available right now")
+    heartbeat = build_heartbeat(config.heartbeat)
+
+    # Warn before scanning if the last successful run is old: the gap itself is
+    # the signal that something was down while you assumed it was watching.
+    if state.last_success and state.is_stale(config.stale_after_hours):
+        age_h = (state.seconds_since_success() or 0) / 3600
+        log.warning(
+            "last successful scan was %.1fh ago (threshold %.1fh) — "
+            "the watcher was not running for part of that time",
+            age_h,
+            config.stale_after_hours,
+        )
+
+    stats: dict = {}
+    try:
+        hits = scan(config, stats=stats)
+    except Exception as exc:  # noqa: BLE001 - record, ping, then re-raise upward
+        state.record_run(ok=False, error=str(exc))
+        state.save()
+        if heartbeat.enabled:
+            heartbeat.failure()
+        raise
+
+    # A run that reached nothing is a failure, not a quiet "nothing available".
+    reached_anything = stats.get("campgrounds_ok", 0) > 0
+    if not reached_anything:
+        problems = "; ".join(stats.get("errors", [])) or "no campgrounds reached"
+        log.error("scan reached no campgrounds: %s", problems)
+        state.record_run(ok=False, error=problems)
+        state.save()
+        if heartbeat.enabled:
+            heartbeat.failure()
         return []
 
-    fresh = [h for h in hits if state.should_notify(h.dedupe_key)]
-    log.info("%d pair(s) found, %d new since last alert", len(hits), len(fresh))
-    if not fresh:
-        return hits
+    state.record_run(
+        ok=True,
+        pairs_found=len(hits),
+        sites_checked=stats.get("sites_checked", 0),
+    )
+    if stats.get("errors"):
+        log.warning("partial scan: %s", "; ".join(stats["errors"]))
 
-    if dry_run:
+    fresh = [h for h in hits if state.should_notify(h.dedupe_key)]
+    if hits:
+        log.info("%d pair(s) found, %d new since last alert", len(hits), len(fresh))
+    else:
+        log.info("no adjacent desirable pairs available right now")
+
+    if fresh and dry_run:
         print(format_subject(fresh))
         print(format_body(fresh))
-        log.info("dry run: not sending notifications, not recording state")
-        return hits
+        log.info("dry run: not sending notifications, not recording alert state")
+    elif fresh:
+        if dispatch(notifiers, fresh):
+            state.mark_notified(h.dedupe_key for h in fresh)
+            state.record_alert(len(fresh))
+        else:
+            # Nothing got through, so don't burn the cooldown -- retry next pass.
+            log.error("no notifier succeeded; leaving alert state unchanged so we retry")
 
-    if dispatch(notifiers, fresh):
-        state.mark_notified(h.dedupe_key for h in fresh)
-        state.prune()
-        state.save()
-    else:
-        # Nothing got through, so don't burn the cooldown -- retry next pass.
-        log.error("no notifier succeeded; leaving state unchanged so we retry")
+    state.prune()
+    state.save()
+    if heartbeat.enabled:
+        heartbeat.success()
     return hits
 
 
@@ -342,6 +384,139 @@ def cmd_watch(args: argparse.Namespace, config: Config) -> int:
             time.sleep(sleep_for)
         except KeyboardInterrupt:
             raise
+
+
+def _ago(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "never"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min ago"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f} hours ago"
+    return f"{seconds / 86400:.1f} days ago"
+
+
+def _scheduler_status() -> list[str]:
+    """Best-effort check for whether anything is scheduled to run us.
+
+    Only *active* schedulers count. `systemctl is-active` prints "unknown" or
+    "inactive" for a unit that was never installed, and treating that as a
+    finding would report an unscheduled host as scheduled.
+    """
+    import shutil
+    import subprocess
+
+    findings: list[str] = []
+
+    if shutil.which("systemctl"):
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "campscout.timer"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            state = result.stdout.strip()
+            if state == "active":
+                findings.append("systemd timer campscout.timer: active")
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    if shutil.which("crontab"):
+        try:
+            result = subprocess.run(
+                ["crontab", "-l"], capture_output=True, text=True, timeout=5
+            )
+            lines = [
+                ln.strip()
+                for ln in result.stdout.splitlines()
+                if "campscout" in ln and not ln.strip().startswith("#")
+            ]
+            if lines:
+                findings.append(f"crontab: {len(lines)} campscout entry/entries")
+                findings.extend(f"    {ln}" for ln in lines)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    return findings
+
+
+def cmd_status(args: argparse.Namespace, config: Config) -> int:
+    """Answer the only question that matters: is this actually watching?"""
+    state = AlertState(config.state_path, config.cooldown_hours)
+    runs = state.runs
+    age = state.seconds_since_success()
+    stale = state.is_stale(config.stale_after_hours)
+
+    if age is None:
+        verdict = "NOT RUNNING — no successful scan has ever completed"
+    elif stale:
+        verdict = f"STALE — last successful scan {_ago(age)}, expected within {config.stale_after_hours}h"
+    else:
+        verdict = f"OK — last successful scan {_ago(age)}"
+
+    print()
+    print("=" * 68)
+    print(f"  {verdict}")
+    print("=" * 68)
+
+    print("\nScan history")
+    print(f"  last success   : {_ago(age)}")
+    print(f"  last attempt   : {_ago(state.seconds_since_attempt())}")
+    print(f"  total scans    : {runs.get('total_scans', 0)}")
+    print(f"  sites checked  : {runs.get('last_sites_checked', 0)} (last run)")
+    print(f"  pairs found    : {runs.get('last_pairs_found', 0)} (last run)")
+    print(f"  alerts sent    : {runs.get('total_alerts', 0)} total, last {_ago(state.seconds_since_alert())}")
+    if runs.get("last_error"):
+        print(f"  last error     : {runs['last_error']}")
+
+    print("\nWhat it is watching")
+    enabled = config.enabled_campgrounds()
+    ready = [c for c in enabled if c.configured]
+    for cg in enabled:
+        mark = "ok " if cg.configured else "NOT CONFIGURED"
+        print(f"  [{mark:>14}] {cg.name}")
+    stays = config.all_stays()
+    print(f"  {len(stays)} candidate stays, min_score {config.min_score}, "
+          f"{config.horizon_days}d horizon")
+
+    print("\nScheduling")
+    findings = _scheduler_status()
+    if findings:
+        for line in findings:
+            print(f"  {line}")
+    else:
+        print("  no systemd timer or crontab entry found for campscout")
+        print("  (if you run `watch` in tmux/screen this check cannot see it)")
+
+    heartbeat = build_heartbeat(config.heartbeat)
+    print("\nDead-man's switch")
+    if heartbeat.enabled:
+        print(f"  configured: {heartbeat.url}")
+        print("  an outside service will alert you if these pings stop")
+    else:
+        print("  NOT configured — if this host dies you will not be told;")
+        print("  silence will look exactly like 'nothing available'.")
+        print("  Set heartbeat.url in config.yaml (healthchecks.io is free).")
+
+    print()
+
+    problems = []
+    if not ready:
+        problems.append("no campground has a facility_id — run `discover --write`")
+    if age is None:
+        problems.append("never completed a scan — run `campscout scan`")
+    if not findings:
+        problems.append("nothing scheduled — install the timer or a cron entry")
+    if problems:
+        print("To start actually watching:")
+        for i, problem in enumerate(problems, 1):
+            print(f"  {i}. {problem}")
+        print()
+        return 1
+    return 0 if not stale else 1
 
 
 def cmd_test_notify(args: argparse.Namespace, config: Config) -> int:
@@ -411,6 +586,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("watch", help="poll on an interval")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("status", help="is it actually running? when did it last check?")
+    p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("test-notify", help="send a fake alert to check your notifier setup")
     p.set_defaults(func=cmd_test_notify)

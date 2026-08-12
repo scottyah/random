@@ -155,6 +155,8 @@ class Config:
     cache_dir: Path = PROJECT_DIR / "data" / "cache"
     notifiers: list[dict] = field(default_factory=list)
     request: dict = field(default_factory=dict)
+    heartbeat: dict = field(default_factory=dict)
+    stale_after_hours: float = 3.0
 
     def enabled_campgrounds(self) -> list[Campground]:
         return [c for c in self.campgrounds if c.enabled]
@@ -223,4 +225,6 @@ def load_config(
         cache_dir=Path(paths.get("cache", PROJECT_DIR / "data" / "cache")),
         notifiers=user.get("notifiers", []) or [],
         request=user.get("request", {}) or {},
+        heartbeat=user.get("heartbeat", {}) or {},
+        stale_after_hours=float(user.get("stale_after_hours", 3.0)),
     )

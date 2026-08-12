@@ -20,6 +20,7 @@ class AlertState:
         self.path = Path(path)
         self.cooldown_seconds = cooldown_hours * 3600.0
         self._sent: dict[str, float] = {}
+        self.runs: dict[str, object] = {}
         self._load()
 
     def _load(self) -> None:
@@ -29,18 +30,81 @@ class AlertState:
             with self.path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
             self._sent = {str(k): float(v) for k, v in (data.get("sent") or {}).items()}
+            self.runs = dict(data.get("runs") or {})
         except (OSError, ValueError, TypeError) as exc:
             # A corrupt state file should degrade to "notify again", never crash
             # the watcher.
             log.warning("could not read state file %s (%s); starting fresh", self.path, exc)
             self._sent = {}
+            self.runs = {}
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
-            json.dump({"sent": self._sent}, fh, indent=2, sort_keys=True)
+            json.dump({"sent": self._sent, "runs": self.runs}, fh, indent=2, sort_keys=True)
         tmp.replace(self.path)
+
+    # ---- heartbeat -----------------------------------------------------
+    #
+    # Without this, "no alerts" is ambiguous: it could mean nothing is
+    # available, or it could mean the scraper has been dead for a month. The
+    # heartbeat makes the difference observable.
+
+    def record_run(
+        self,
+        ok: bool,
+        pairs_found: int = 0,
+        sites_checked: int = 0,
+        error: str = "",
+        now: float | None = None,
+    ) -> None:
+        now = time.time() if now is None else now
+        self.runs["last_attempt"] = now
+        self.runs["total_scans"] = int(self.runs.get("total_scans", 0) or 0) + 1
+        if ok:
+            self.runs["last_success"] = now
+            self.runs["last_pairs_found"] = pairs_found
+            self.runs["last_sites_checked"] = sites_checked
+            self.runs["last_error"] = ""
+        else:
+            self.runs["last_error"] = error[:500]
+            self.runs["last_failure"] = now
+
+    def record_alert(self, count: int, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self.runs["last_alert"] = now
+        self.runs["total_alerts"] = int(self.runs.get("total_alerts", 0) or 0) + count
+
+    @property
+    def last_success(self) -> float | None:
+        value = self.runs.get("last_success")
+        return float(value) if value else None
+
+    def seconds_since_success(self, now: float | None = None) -> float | None:
+        now = time.time() if now is None else now
+        last = self.last_success
+        return None if last is None else now - last
+
+    def _seconds_since(self, key: str, now: float | None = None) -> float | None:
+        now = time.time() if now is None else now
+        value = self.runs.get(key)
+        return (now - float(value)) if value else None
+
+    def seconds_since_attempt(self, now: float | None = None) -> float | None:
+        return self._seconds_since("last_attempt", now)
+
+    def seconds_since_alert(self, now: float | None = None) -> float | None:
+        return self._seconds_since("last_alert", now)
+
+    def is_stale(self, max_age_hours: float, now: float | None = None) -> bool:
+        """True when we have not completed a successful scan recently.
+
+        A never-run watcher counts as stale: that is precisely the state where
+        you would wrongly read silence as "nothing available".
+        """
+        age = self.seconds_since_success(now)
+        return age is None or age > (max_age_hours * 3600.0)
 
     def should_notify(self, key: str, now: float | None = None) -> bool:
         now = time.time() if now is None else now

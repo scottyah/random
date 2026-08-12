@@ -34,24 +34,77 @@ this tool assigns each one.
 ```bash
 git clone <this repo>
 cd beach-campground-scraper
+./deploy/install.sh          # venv, deps, tests, ID discovery, systemd timer
+```
+
+Then confirm it's actually watching:
+
+```bash
+python -m campscout status
+```
+
+Manual equivalent, if you'd rather do it step by step:
+
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
 cp config.example.yaml config.yaml
 
-# 1. Resolve the real ReserveCalifornia IDs (writes them into data/campgrounds.yaml)
-python -m campscout discover --write
-
-# 2. Look at what it found
-python -m campscout sites san_elijo
-
-# 3. Check your notifications work
-python -m campscout test-notify
-
-# 4. Run it
-python -m campscout scan --dry-run
-python -m campscout watch
+python -m campscout discover --write   # resolve real ReserveCalifornia IDs
+python -m campscout sites san_elijo    # see what it found
+python -m campscout test-notify        # prove alerts reach you
+python -m campscout scan               # one pass
+python -m campscout status             # is it healthy?
 ```
+
+## Knowing it's actually running
+
+The trap with a notify-only watcher: **silence is ambiguous.** No alerts might
+mean no adjacent sites opened up, or it might mean the scraper died weeks ago.
+Three things keep those distinguishable:
+
+**`campscout status`** — the direct answer:
+
+```
+====================================================================
+  OK — last successful scan 4 min ago
+====================================================================
+
+Scan history
+  last success   : 4 min ago
+  total scans    : 1249
+  sites checked  : 392 (last run)
+  alerts sent    : 3 total, last 2.1 days ago
+
+What it is watching
+  [ok            ] San Elijo State Beach
+  [ok            ] South Carlsbad State Beach
+  52 candidate stays, min_score 85, 180d horizon
+
+Scheduling
+  systemd timer campscout.timer: active
+```
+
+It exits non-zero when something is wrong, so `campscout status || alert-me`
+works in a cron of its own. On a fresh checkout it says `NOT RUNNING` and lists
+exactly what's missing.
+
+**A failed scan is never mistaken for a quiet one.** If no campground could be
+reached, that's recorded as a failure, not as "nothing available" — so a
+persistent API outage shows up as `STALE` rather than looking healthy.
+
+**A dead-man's switch**, which is the only part that survives the host itself
+dying. A watcher can't tell you it stopped — if it's dead it isn't sending
+anything. So invert it: ping an outside service after each successful scan and
+let that service alert you when pings stop.
+
+```yaml
+heartbeat:
+  url: ${CAMPSCOUT_HEARTBEAT_URL}    # e.g. a healthchecks.io ping URL (free)
+```
+
+Without this, a powered-off server is indistinguishable from a fully-booked
+campground. `status` warns when it isn't configured.
 
 ### Step 1 is required
 
@@ -205,7 +258,7 @@ want to talk through credential storage first.
 python -m unittest discover -s tests
 ```
 
-49 tests, no network. Because the live API was unreachable while building this,
+63 tests, no network. Because the live API was unreachable while building this,
 `tests/test_end_to_end.py` runs the whole pipeline — grid parsing, scoring,
 adjacency, dedupe, message formatting — against a stubbed backend with a
 realistic payload, including the fallback path where the API returns no

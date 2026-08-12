@@ -37,6 +37,18 @@ poll_seconds: 600
 # Don't re-alert on the same pair+dates within this many hours.
 cooldown_hours: 12
 
+# `campscout status` reports STALE if no successful scan completed within this
+# many hours. Keep it a few multiples of your poll interval.
+stale_after_hours: 3
+
+# Dead-man's switch. STRONGLY recommended: without it, a scraper that died
+# looks exactly like a campground with no openings — you get silence either way.
+# Create a free check at healthchecks.io and paste its ping URL here; it emails
+# you when the pings stop.
+heartbeat:
+  url: ${CAMPSCOUT_HEARTBEAT_URL}
+  # fail_url defaults to <url>/fail
+
 request:
   timeout: 30
   min_interval: 1.0        # seconds between API calls

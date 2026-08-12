@@ -81,14 +81,27 @@ def scan(
     config: Config,
     client: Optional[ReserveCalifornia] = None,
     today: Optional[date] = None,
+    stats: Optional[dict] = None,
 ) -> list[PairHit]:
-    """Run one full pass over every enabled, configured campground."""
+    """Run one full pass over every enabled, configured campground.
+
+    `stats`, if given, is filled in with counters the caller needs for the
+    heartbeat: how many campgrounds were actually reached, how many sites were
+    inspected, and any per-campground errors. Passed as an out-param rather
+    than folded into the return value so the common case stays a plain list.
+    """
     today = today or date.today()
     client = client or ReserveCalifornia(**config.request)
+    stats = stats if stats is not None else {}
+    stats.setdefault("campgrounds_ok", 0)
+    stats.setdefault("campgrounds_attempted", 0)
+    stats.setdefault("sites_checked", 0)
+    stats.setdefault("errors", [])
 
     stays = config.all_stays(today=today)
     if not stays:
         log.warning("no search windows produced any candidate stays; check config.yaml")
+        stats["errors"].append("no candidate stays; check search.windows in config.yaml")
         return []
 
     horizon_end = max(s.checkout for s in stays)
@@ -107,8 +120,10 @@ def scan(
                 "[%s] no facility_id yet — run `campscout discover --write` first; skipping",
                 campground.key,
             )
+            stats["errors"].append(f"{campground.key}: no facility_id (run `discover --write`)")
             continue
 
+        stats["campgrounds_attempted"] += 1
         try:
             sites, free = client.availability(
                 campground.facility_id, horizon_start, horizon_end
@@ -116,8 +131,11 @@ def scan(
         except ReserveCaliforniaError as exc:
             # One flaky park should not abort the whole run.
             log.error("[%s] availability lookup failed: %s", campground.key, exc)
+            stats["errors"].append(f"{campground.key}: {exc}")
             continue
 
+        stats["campgrounds_ok"] += 1
+        stats["sites_checked"] += len(sites)
         log.info("[%s] %d sites returned", campground.key, len(sites))
         min_score = campground.min_score if campground.min_score is not None else config.min_score
         hits = find_pairs_for_campground(
