@@ -1,0 +1,139 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    container:
+      # buildah + kubectl + sops + age pre-baked (see stonks/ci/toolbox.Dockerfile);
+      # rebuild via that repo's "Build CI toolbox" workflow_dispatch
+      image: harbor.scottyah.com/ci/ci-toolbox
+    steps:
+      - name: Checkout
+        run: |
+          set -euo pipefail
+          git clone --depth 2 --branch "${{ github.ref_name }}" \
+            "https://x-access-token:${{ github.token }}@git.scottyah.com/${{ github.repository }}.git" .
+
+      - name: Check what changed
+        run: |
+          set -euo pipefail
+          # Manual dispatch always builds: it's the recovery path for "the
+          # image was never pushed", and a diff-based skip would recompute
+          # the same skip that caused the problem.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — will build"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "ALL")
+          echo "Changed files: $CHANGED"
+          NON_INFRA=$(echo "$CHANGED" | grep -v -E '^(k8s\.yaml|\.env\.encrypted|ship\.sh|README\.md|\.gitignore|\.sops\.yaml|deploy/.*)$' || true)
+          if [ -z "$NON_INFRA" ] && [ "$CHANGED" != "ALL" ]; then
+            touch /tmp/skip-build
+            echo "Only infra files changed — skipping build"
+          else
+            echo "App files changed — will build"
+          fi
+
+      - name: Decrypt secrets
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.SOPS_AGE_KEY }}" > /tmp/age-key.txt
+          export SOPS_AGE_KEY_FILE=/tmp/age-key.txt
+          sops --decrypt --input-type dotenv --output-type dotenv .env.encrypted > .env
+          rm /tmp/age-key.txt
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+
+      - name: Build and push image
+        run: |
+          set -euo pipefail
+
+          if [ -f /tmp/skip-build ]; then
+            echo "Skipping build — no app changes"
+            exit 0
+          fi
+
+          IMAGE_BASE=harbor.scottyah.com/secure/campscout
+          SHA="${{ github.sha }}"
+
+          # Login to Harbor
+          printf '[[registry]]\nlocation = "harbor.scottyah.com"\ninsecure = true\n' \
+            > /etc/containers/registries.conf.d/harbor.conf
+
+          buildah login --tls-verify=false \
+            -u "${{ secrets.HARBOR_USERNAME }}" \
+            -p "${{ secrets.HARBOR_PASSWORD }}" \
+            harbor.scottyah.com
+
+          # Build
+          buildah --isolation chroot bud \
+            --tls-verify=false \
+            --platform linux/amd64 \
+            -t "${IMAGE_BASE}:${SHA}" \
+            -t "${IMAGE_BASE}:latest" \
+            .
+
+          # Push
+          buildah push --tls-verify=false --retry 3 --retry-delay 10s \
+            "${IMAGE_BASE}:${SHA}"
+          buildah push --tls-verify=false --retry 3 --retry-delay 10s \
+            "${IMAGE_BASE}:latest"
+
+      - name: Deploy to Kubernetes
+        run: |
+          set -euo pipefail
+
+          # Parse .env safely
+          while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            export "$key=$value"
+          done < .env
+
+          # Setup kubeconfig
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > ~/.kube/config
+
+          K8S_NS=campscout
+          SHA="${{ github.sha }}"
+
+          # Ensure namespace exists before creating secrets in it
+          kubectl create namespace $K8S_NS --dry-run=client -o yaml | kubectl apply -f -
+
+          # Ensure Harbor pull secret exists in the namespace
+          kubectl create secret docker-registry harborcred -n $K8S_NS \
+            --docker-server=harbor.scottyah.com \
+            --docker-username="${{ secrets.HARBOR_USERNAME }}" \
+            --docker-password="${{ secrets.HARBOR_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Sync app secrets from decrypted .env. These are expanded as ${VAR}
+          # in config.yaml at load time, so they never land in the ConfigMap.
+          CAMPSCOUT_KEYS=(NTFY_TOPIC CAMPSCOUT_HEARTBEAT_URL SMTP_USERNAME SMTP_PASSWORD)
+          CAMPSCOUT_ARGS=()
+          for key in "${CAMPSCOUT_KEYS[@]}"; do
+            val="${!key:-}"
+            [ -n "$val" ] && CAMPSCOUT_ARGS+=("--from-literal=${key}=${val}")
+          done
+          kubectl create secret generic campscout-secrets -n $K8S_NS \
+            "${CAMPSCOUT_ARGS[@]}" --dry-run=client -o yaml | kubectl apply -f -
+
+          # Pin image tag to this commit SHA (only if we built a new image)
+          if [ ! -f /tmp/skip-build ]; then
+            sed -i "s|harbor.scottyah.com/secure/campscout:latest|harbor.scottyah.com/secure/campscout:${SHA}|" k8s.yaml
+          fi
+
+          # Apply manifests. This is a CronJob, not a Deployment — there is no
+          # rollout to wait on; the next scheduled run picks up the new image.
+          kubectl apply -f k8s.yaml
+          kubectl -n $K8S_NS get cronjob campscout
+          echo "Deployed. Next scan runs on the CronJob schedule (every 10 min)."
+          echo "Tail it with: kubectl -n campscout logs -l app=campscout --tail=50"
+
+      - name: Clean up secrets
+        if: always()
+        run: rm -f .env /tmp/age-key.txt ~/.kube/config

@@ -8,6 +8,7 @@ __pycache__
 # Never bake local secrets or state into an image
 config.yaml
 .env
+.env.encrypted
 data/state.json
 data/cache
 data/sites
@@ -18,3 +19,6 @@ README.md
 Dockerfile
 .dockerignore
 k8s.yaml
+.gitea
+.sops.yaml
+ship.sh

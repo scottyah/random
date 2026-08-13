@@ -14,7 +14,7 @@ backend (ReserveCalifornia / UseDirect) and one scraper covers all of them.
 |---|---|---|---|---|
 | `san_elijo` | San Elijo State Beach | Cardiff-by-the-Sea, Encinitas | ~170 | Low bluff directly above the sand, stairs to the beach. The prize. |
 | `south_carlsbad` | South Carlsbad State Beach | Carlsbad | ~220 | Long linear bluff strip, ~30 min north of downtown. Ponto beach at both ends. |
-| `san_onofre_bluffs` | San Onofre SB — Bluffs | San Clemente, at the county line | 175 | Rustic: no hookups, chemical toilets, cold showers. Online booking mid-Mar→mid-Sep only. Off by default. |
+| `san_onofre_bluffs` | San Onofre SB — Bluffs | San Clemente, at the county line | 175 | Rustic: no hookups, chemical toilets, cold showers. Online booking mid-Mar→mid-Sep only. Watched in local runs; not in the k8s ConfigMap. |
 | `san_elijo_group` | San Elijo — Grunion Run group site | Encinitas | 1 | Single group site (#128), so there is no "adjacent pair". Disabled; documented for completeness. |
 
 Site maps and park pages:
@@ -24,16 +24,16 @@ python -m campscout maps               # print the links
 python -m campscout maps --download    # save the PDFs locally
 ```
 
-Note that `data/campgrounds.yaml` also has a `sites` command that dumps the
-**live** site roster from the API — that's a more useful "site map" than the
-PDF, because it includes real per-site coordinates and the desirability score
-this tool assigns each one.
+There is also a `sites` command that dumps the **live** site roster from the
+API with the desirability score this tool assigns each one — a more useful
+"which sites matter" view than the PDF. (It has a coordinates column, but the
+current backend returns none — see "Reality check" below.)
 
 ## Quick start
 
 ```bash
-git clone <this repo>
-cd beach-campground-scraper
+git clone https://git.scottyah.com/scottyah/campscout.git
+cd campscout
 ./deploy/install.sh          # venv, deps, tests, ID discovery, systemd timer
 ```
 
@@ -123,17 +123,62 @@ from read-only mounts. `scan` is the default command; pass `watch` for a
 long-running container (it handles SIGTERM and finishes the current pass, so
 `docker stop` is clean rather than a 10-second wait for SIGKILL).
 
-For Kubernetes, `k8s.yaml` is a template — grep for `CHANGEME`:
+For Kubernetes this deploys like the other apps: push to git.scottyah.com and
+Gitea Actions does the rest (`.gitea/workflows/deploy.yaml` builds the image
+with buildah, pushes it to `harbor.scottyah.com/secure/campscout`, creates the
+`campscout-secrets` and `harborcred` Secrets from the sops-encrypted
+`.env.encrypted`, pins the image to the commit SHA, and applies `k8s.yaml`).
+
+One-time setup — secrets only (facility IDs are already resolved and baked
+into `k8s.yaml`, see below):
 
 ```bash
-python -m campscout discover        # locally, note the IDs
-# paste them into the campgrounds.yaml ConfigMap in k8s.yaml
-kubectl apply -f k8s.yaml
-kubectl -n campscout logs -l app=campscout --tail=50
+# Copy .env.example to .env, fill in NTFY_TOPIC (heartbeat URL optional),
+# then run ./ship.sh (encrypts, commits, pushes).
+# The Gitea org secrets (SOPS_AGE_KEY / HARBOR_* / KUBECONFIG_DATA)
+# must be visible to this repo.
 ```
+
+Day-to-day is `./ship.sh` after changing secrets, or a plain `git push` for
+code changes; either triggers a build and deploy. Manual
+`kubectl apply -f k8s.yaml` still works — the header comment in that file
+covers creating the two Secrets by hand first.
 
 It ships a CronJob (every 10 min) plus a commented Deployment alternative for
 in-process `watch`. Use one or the other — they share a ReadWriteOnce volume.
+
+### Operating it on the cluster
+
+```bash
+kubectl -n campscout get jobs                          # recent scans: want Complete, not Failed
+kubectl -n campscout logs -l app=campscout --tail=50   # what the last scan saw
+kubectl -n campscout delete jobs --field-selector status.successful=0   # clear failed history
+```
+
+To prove alerts reach your phone, run `test-notify` with the CronJob's own pod
+spec (it carries the pull secret, config mount, and ntfy Secret — a bare
+`kubectl run` has none of those and will hang or fall back to console):
+
+```bash
+kubectl -n campscout create job test-notify --from=cronjob/campscout --dry-run=client -o json \
+  | jq '.spec.template.spec.containers[0].args = ["test-notify"]' \
+  | kubectl -n campscout apply -f -
+kubectl -n campscout wait --for=condition=complete job/test-notify --timeout=120s
+kubectl -n campscout logs job/test-notify
+kubectl -n campscout delete job test-notify
+```
+
+### If pods can't pull the image
+
+CI skips the image build when only infra files changed — which assumes some
+earlier run already pushed an image. On a brand-new repo whose first runs
+failed before the build step, a later docs-only push goes green while the
+manifests point at an image that doesn't exist (pods sit in ImagePullBackOff
+while the pipeline looks healthy). Recovery: **Run workflow** (manual
+dispatch) on the Actions page — dispatch always builds, precisely for this
+case. New-repo checklist while you're there: the Gitea Actions secrets
+(`SOPS_AGE_KEY`, `HARBOR_USERNAME`, `HARBOR_PASSWORD`, `KUBECONFIG_DATA`) are
+not inherited from other repos unless they're set at the user level.
 
 Three things in there are load-bearing rather than boilerplate:
 
@@ -146,24 +191,26 @@ Three things in there are load-bearing rather than boilerplate:
   has no cron or systemd timer, so plain `status` would report "nothing
   scheduled", exit non-zero, and restart-loop a perfectly healthy pod.
 
-A scan that reaches zero campgrounds now exits non-zero, so the most likely
-misconfiguration — leaving `CHANGEME` in the facility IDs — surfaces as a failed
-Job instead of a green one that quietly never checks anything.
+A scan that reaches zero campgrounds exits non-zero, so a broken ConfigMap
+surfaces as a failed Job instead of a green one that quietly never checks
+anything.
 
-Discovery is a bootstrap step, not a runtime one: it writes a file, and the
-ConfigMap is mounted read-only. Run it locally and paste the IDs in.
+### About the facility IDs
 
-### Step 1 is required
+`place_id` / `facility_ids` originally shipped as `null` because they couldn't
+be verified against the live API — a wrong hardcoded facility ID doesn't
+error, it silently scans the wrong campground. They were resolved for real via
+`discover --write` on 2026-08-12, against the current (Tyler-hosted) backend.
+A park is usually split into several per-section "facilities" — San Elijo is
+three — and `facility_ids` lists all of them, because watching one section
+silently misses the rest (San Elijo's bluff-front row lives in a different
+facility than the discover default would have picked).
 
-`place_id` and `facility_id` ship as `null` on purpose. I built this in an
-environment whose egress policy blocked `calirdr.usedirect.com`, so I could not
-verify the IDs against the live API — and a wrong hardcoded facility ID doesn't
-error, it silently scans the wrong campground and never alerts you. `discover`
-resolves them for real from your server. There's a test that fails if anyone
-pastes in an unverified ID.
-
-If `discover` can't match a park automatically, run it without `--write`, read
-the table, and paste the IDs into `data/campgrounds.yaml` by hand.
+Re-run `python -m campscout discover --write` any time to re-verify; there are
+tests that fail if the IDs stop looking real. For parks whose name covers two
+physical campgrounds (San Onofre SB is both Bluff Camp and San Mateo Camp,
+with overlapping site numbers), `facility_match` in `data/campgrounds.yaml`
+pins discovery to the right one.
 
 ## How "adjacent" is decided
 
@@ -177,8 +224,10 @@ That heuristic fails both ways, and both matter:
   and even rows facing each other. Fixed with `extra_pairs`.
 
 When the API returns coordinates, the tool skips the guessing and measures
-actual distance instead. `mode: either` (the default) accepts a pair if *either*
-test passes:
+actual distance instead. The current (Tyler-hosted) backend returns none, so
+in practice the numeric test is the one that fires; `mode: either` (the
+default) accepts a pair if *either* test passes, which also means geo kicks
+back in by itself if coordinates ever return:
 
 ```yaml
 adjacency:
@@ -226,11 +275,14 @@ The geo rule only ever *raises* a score, so hand-curated tiers stay
 authoritative. It's skipped entirely if fewer than 8 sites have coordinates,
 where the percentile split would be noise.
 
-`san_elijo`'s tiers come from published site-number ranges (bluff-front 145–171,
-ocean side 1–43). `south_carlsbad` deliberately has **no** hand-written ranges —
-I couldn't verify them, so it relies on the geo rule, which is reliable for a
-strip campground. Add tiers there yourself after looking at `campscout sites
-south_carlsbad`.
+**Reality check (2026-08-12):** the live API — now hosted on Tyler
+Technologies' platform — returns `Latitude: 0.0, Longitude: 0.0` for every
+site, so the geo rule currently never fires and `scan` warns loudly when a
+configured geo rule is inert. `san_elijo`'s hand-written tiers are unaffected.
+`south_carlsbad` and `san_onofre_bluffs` had no tiers, so their `default` is
+set to 85: any open adjacent pair there alerts. To prefer the oceanfront row
+again, read the camp map, then add `tiers` by site number (check the roster
+with `campscout sites south_carlsbad`).
 
 ## Search windows
 
@@ -305,11 +357,11 @@ want to talk through credential storage first.
 python -m unittest discover -s tests
 ```
 
-76 tests, no network. Because the live API was unreachable while building this,
-`tests/test_end_to_end.py` runs the whole pipeline — grid parsing, scoring,
-adjacency, dedupe, message formatting — against a stubbed backend with a
-realistic payload, including the fallback path where the API returns no
-coordinates.
+79 tests, no network. Because the live API was unreachable while first building
+this, `tests/test_end_to_end.py` runs the whole pipeline — grid parsing,
+scoring, adjacency, dedupe, message formatting — against a stubbed backend with
+a realistic payload, including the no-coordinates path that turned out to be
+the live backend's actual behavior.
 
 ## Layout
 

@@ -41,7 +41,7 @@ say "Resolving ReserveCalifornia facility IDs"
 if "$VENV/bin/python" -m campscout discover --write; then
     echo "    IDs written to data/campgrounds.yaml"
 else
-    die "discovery failed -- check outbound HTTPS to calirdr.usedirect.com, then re-run"
+    die "discovery failed -- check outbound HTTPS to the ReserveCalifornia API host (see BASE in campscout/providers/reserve_california.py), then re-run"
 fi
 
 say "Verifying we can actually read a campground"

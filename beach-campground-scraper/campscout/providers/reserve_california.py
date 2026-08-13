@@ -50,7 +50,11 @@ def _first_float(payload: dict, *keys: str) -> Optional[float]:
 
 
 class ReserveCalifornia:
-    BASE = "https://calirdr.usedirect.com/rdr/rdr"
+    # ReserveCalifornia's backend moved from calirdr.usedirect.com (whose DNS
+    # now sinkholes to 0.0.0.0) to Tyler Technologies' platform in 2026. The
+    # live value is published at https://www.reservecalifornia.com/config.json
+    # under "rdrApiUrl" — check there first if this ever starts failing.
+    BASE = "https://california-rdr.prod.cali.rd12.recreation-management.tylerapp.com/rdr"
     WEB = "https://www.reservecalifornia.com"
 
     PLACE_SEARCH_PATHS = ("/search/place", "/search/places")

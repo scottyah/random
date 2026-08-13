@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -424,11 +424,111 @@ class TestBundledConfig(unittest.TestCase):
         self.assertTrue(cg.desirability.is_excluded(site(128)))
         self.assertFalse(cg.desirability.is_excluded(site(150)))
 
-    def test_ids_are_unset_pending_discovery(self):
-        # Guards against someone pasting in an unverified ID.
+    def test_shipped_ids_look_like_real_api_ids(self):
+        # IDs were resolved from the live API via `discover --write` on
+        # 2026-08-12 (Tyler-hosted ReserveCalifornia backend). Anything
+        # non-numeric here (CHANGEME, null) means someone hand-edited badly.
         config = load_config(config_path=Path("/nonexistent-config.yaml"))
         for cg in config.campgrounds:
-            self.assertIsNone(cg.facility_id, f"{cg.key} should await `discover`")
+            if not cg.enabled:
+                continue
+            self.assertTrue(cg.facility_ids, f"{cg.key} lost its facility_ids")
+            for fid in cg.facility_ids:
+                self.assertTrue(fid.isdigit(), f"{cg.key}: bad facility_id {fid!r}")
+            self.assertTrue(
+                cg.place_id and cg.place_id.isdigit(), f"{cg.key}: bad place_id"
+            )
+
+    def test_san_elijo_watches_every_section(self):
+        # San Elijo is three facilities. The score-100 bluff-front row
+        # (sites 145-171) is in the Northern Section (666); watching only
+        # the discover-default Middle Section would silently miss it.
+        config = load_config(config_path=Path("/nonexistent-config.yaml"))
+        cg = config.campground("san_elijo")
+        self.assertIn("666", cg.facility_ids)
+        self.assertGreaterEqual(len(cg.facility_ids), 3)
+
+
+class TestMultiFacility(unittest.TestCase):
+    def test_facility_ids_list_and_singular_shorthand(self):
+        from campscout.config import Campground
+
+        multi = Campground.from_dict({"key": "m", "facility_ids": [665, 666]})
+        self.assertEqual(multi.facility_ids, ["665", "666"])
+        self.assertEqual(multi.facility_id, "665")
+        self.assertTrue(multi.configured)
+
+        single = Campground.from_dict({"key": "s", "facility_id": "42"})
+        self.assertEqual(single.facility_ids, ["42"])
+        self.assertTrue(single.configured)
+
+    def test_scan_merges_facilities_so_pairs_span_sections(self):
+        """Two adjacent free sites split across facilities must still pair."""
+        import tempfile
+
+        import yaml
+
+        from campscout.scan import scan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.yaml"
+            cfg.write_text(
+                yaml.safe_dump(
+                    {
+                        "search": {
+                            "min_score": 0,
+                            "horizon_days": 30,
+                            "windows": [{"label": "w", "nights": 2, "weekdays": [4]}],
+                        },
+                        "paths": {"state": str(Path(tmp) / "state.json")},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cg = Path(tmp) / "campgrounds.yaml"
+            cg.write_text(
+                yaml.safe_dump(
+                    {
+                        "campgrounds": [
+                            {
+                                "key": "split",
+                                "name": "Split Park",
+                                "place_id": "7",
+                                "facility_ids": ["100", "200"],
+                                "adjacency": {"mode": "numeric"},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path=cfg, campgrounds_path=cg)
+
+        per_facility = {
+            "100": site(10, unit_id="u10"),
+            "200": site(11, unit_id="u11"),
+        }
+
+        class StubClient:
+            calls: list[str] = []
+
+            def availability(self, facility_id, start, end):
+                self.calls.append(facility_id)
+                s = per_facility[facility_id]
+                nights = {start + timedelta(days=i) for i in range((end - start).days)}
+                return {s.unit_id: s}, {s.unit_id: set(nights)}
+
+            def booking_url(self, place_id, facility_id):
+                return f"https://example.test/{place_id}/{facility_id}"
+
+        stats: dict = {}
+        hits = scan(config, client=StubClient(), today=date(2026, 8, 12), stats=stats)
+        self.assertEqual(StubClient.calls, ["100", "200"])
+        self.assertEqual(stats["campgrounds_ok"], 1)
+        self.assertEqual(stats["sites_checked"], 2)
+        self.assertTrue(hits, "adjacent pair spanning two facilities was not found")
+        numbers = {s.number for h in hits for s in (h.site_a, h.site_b)}
+        self.assertEqual(numbers, {10, 11})
 
 
 if __name__ == "__main__":

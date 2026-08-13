@@ -33,8 +33,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     CAMPSCOUT_CONFIG=/etc/campscout/config.yaml \
     CAMPSCOUT_CAMPGROUNDS=/etc/campscout/campgrounds.yaml
 
-# ca-certificates is genuinely needed: every call is HTTPS to
-# calirdr.usedirect.com, and python:slim ships without the CA bundle refreshed.
+# ca-certificates is genuinely needed: every call is HTTPS to the
+# ReserveCalifornia API, and python:slim ships without the CA bundle refreshed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

@@ -1,6 +1,13 @@
-# campscout on Kubernetes — template. Search for CHANGEME before applying.
+# campscout on Kubernetes.
 #
-#   kubectl apply -f k8s.yaml
+# Normal path: push to git.scottyah.com and let Gitea Actions deploy
+# (.gitea/workflows/deploy.yaml builds the image, creates the
+# campscout-secrets and harborcred Secrets from .env.encrypted, pins the
+# image to the commit SHA, and applies this file).
+#
+# Manual path: create the two Secrets yourself (see the comment above the
+# CronJob), fill in the remaining CHANGEMEs (facility IDs), then
+# `kubectl apply -f k8s.yaml`.
 #
 # Ships a CronJob (default) plus a Deployment alternative at the bottom.
 # Use one or the other, not both — they share a ReadWriteOnce volume.
@@ -84,17 +91,20 @@ data:
       #   sender: ${SMTP_USERNAME}
       #   recipients: ["CHANGEME@example.com"]
 
-  # Paste the IDs from `campscout discover` here. Everything else — the
-  # desirability tiers and adjacency rules — is carried in the image; only
-  # the IDs need filling in.
+  # IDs resolved from the live API via `campscout discover --write` on
+  # 2026-08-12 (Tyler-hosted ReserveCalifornia backend). Each park spans
+  # several "facilities" (sections); all are listed so tiers and adjacency
+  # see the whole campground. Everything else — the desirability tiers and
+  # adjacency rules — is carried in the image.
   campgrounds.yaml: |
     campgrounds:
       - key: san_elijo
         name: San Elijo State Beach
         park: San Elijo SB
         enabled: true
-        place_id: "CHANGEME"
-        facility_id: "CHANGEME"
+        place_id: "709"
+        # Middle (1-39, 93-128), Northern (130-171), Southern (40-92)
+        facility_ids: ["665", "666", "670"]
         desirability:
           default: 15
           tiers:
@@ -117,10 +127,15 @@ data:
         name: South Carlsbad State Beach
         park: South Carlsbad SB
         enabled: true
-        place_id: "CHANGEME"
-        facility_id: "CHANGEME"
+        place_id: "720"
+        # Northern End (1-34, 103-130 / 35-102), Southern End (153-187 / 131-152, 188-223)
+        facility_ids: ["708", "715", "712", "714"]
         desirability:
-          default: 20
+          # The live API returns no per-site coordinates (verified 2026-08-12),
+          # so the geo rule below never fires. default: 85 means any open
+          # adjacent pair here alerts; hand-curate tiers from the camp map if
+          # you want oceanfront-only.
+          default: 85
           geo:
             mode: west_percentile
             percentile: 40
@@ -129,27 +144,20 @@ data:
           mode: either
           max_meters: 35
 ---
-# Secrets are referenced as ${VAR} in the ConfigMap above and expanded from
-# the environment at load time, so they never appear in the ConfigMap itself.
+# The campscout-secrets and harborcred Secrets are deliberately NOT in this
+# file — CI creates them from .env.encrypted on every deploy, and an inline
+# copy here would overwrite the real ones with placeholders on apply.
 #
-# Prefer creating this from the CLI over committing it:
+# Deploying by hand instead? Create them first:
 #   kubectl create secret generic campscout-secrets -n campscout \
 #     --from-literal=NTFY_TOPIC='sd-camping-<something-unguessable>' \
 #     --from-literal=CAMPSCOUT_HEARTBEAT_URL='https://hc-ping.com/<uuid>'
-apiVersion: v1
-kind: Secret
-metadata:
-  name: campscout-secrets
-  namespace: campscout
-type: Opaque
-stringData:
-  NTFY_TOPIC: "CHANGEME-pick-something-unguessable"
-  # An outside service that alerts YOU when these pings stop. Without it, a
-  # cluster that stops running this looks exactly like a booked-out campground.
-  CAMPSCOUT_HEARTBEAT_URL: "CHANGEME-https://hc-ping.com/your-uuid"
-  # SMTP_USERNAME: "CHANGEME"
-  # SMTP_PASSWORD: "CHANGEME"
----
+#   kubectl create secret docker-registry harborcred -n campscout \
+#     --docker-server=harbor.scottyah.com \
+#     --docker-username=<user> --docker-password=<pass>
+#
+# Secret values are referenced as ${VAR} in the ConfigMap above and expanded
+# from the environment at load time, so they never appear in the ConfigMap.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -175,6 +183,8 @@ spec:
             app: campscout
         spec:
           restartPolicy: Never
+          imagePullSecrets:
+            - name: harborcred
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -184,8 +194,9 @@ spec:
               type: RuntimeDefault
           containers:
             - name: campscout
-              image: CHANGEME/campscout:latest
-              imagePullPolicy: IfNotPresent
+              # CI pins :latest to the commit SHA before applying.
+              image: harbor.scottyah.com/secure/campscout:latest
+              imagePullPolicy: Always
               args: ["scan"]
               envFrom:
                 - secretRef:
@@ -249,6 +260,8 @@ spec:
 #       labels:
 #         app: campscout
 #     spec:
+#       imagePullSecrets:
+#         - name: harborcred
 #       securityContext:
 #         runAsNonRoot: true
 #         runAsUser: 10001
@@ -260,7 +273,7 @@ spec:
 #       terminationGracePeriodSeconds: 60
 #       containers:
 #         - name: campscout
-#           image: CHANGEME/campscout:latest
+#           image: harbor.scottyah.com/secure/campscout:latest
 #           args: ["watch"]
 #           envFrom:
 #             - secretRef:

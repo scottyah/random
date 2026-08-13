@@ -147,7 +147,10 @@ class TestManifests(unittest.TestCase):
         self.assertIn("CronJob", kinds)
         self.assertIn("PersistentVolumeClaim", kinds)
         self.assertIn("ConfigMap", kinds)
-        self.assertIn("Secret", kinds)
+        # No Secret on purpose: CI creates campscout-secrets and harborcred
+        # from .env.encrypted, and an inline copy would overwrite them with
+        # placeholders on every apply.
+        self.assertNotIn("Secret", kinds)
 
     def test_embedded_configmap_yaml_is_valid_and_loadable(self):
         docs = [
@@ -168,6 +171,25 @@ class TestManifests(unittest.TestCase):
         self.assertEqual(keys, {"san_elijo", "south_carlsbad"})
         self.assertTrue(config.windows)
         self.assertEqual(str(config.state_path), "/var/lib/campscout/state.json")
+        # The deployed ConfigMap must carry real, verified IDs — a CHANGEME
+        # here means every scan Job fails from the moment it lands.
+        for c in config.campgrounds:
+            self.assertTrue(c.configured, f"{c.key}: no facility_ids in k8s.yaml")
+            for fid in c.facility_ids:
+                self.assertTrue(fid.isdigit(), f"{c.key}: bad facility_id {fid!r}")
+            # The live API returns no coordinates, so geo rules never fire.
+            # Every campground must be able to clear min_score on default +
+            # tiers alone, or it can never alert and is dead weight.
+            best_dry = max(
+                [c.desirability.default] + [t.score for t in c.desirability.tiers]
+            )
+            effective = c.min_score if c.min_score is not None else config.min_score
+            self.assertGreaterEqual(
+                best_dry,
+                effective,
+                f"{c.key} can never alert: max coordinate-free score {best_dry} "
+                f"< min_score {effective}",
+            )
 
     def test_configmap_state_path_matches_the_mounted_volume(self):
         """A mismatch here silently loses state on every run."""

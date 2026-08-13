@@ -120,7 +120,8 @@ def cmd_discover(args: argparse.Namespace, config: Config) -> int:
         log.error("place search failed: %s", exc)
         log.error(
             "If this is a network/policy block, run from a host with plain "
-            "outbound HTTPS to calirdr.usedirect.com."
+            "outbound HTTPS to the ReserveCalifornia API host (see BASE in "
+            "providers/reserve_california.py)."
         )
         return 2
 
@@ -199,21 +200,42 @@ def _write_discovered_ids(
         matches = [r for r in rows if needle and needle in r[0].lower() and r[2] not in ("", "-")]
         if not matches:
             continue
-        park, place_id, facility_id, fac_name = matches[0]
-        if len(matches) > 1:
-            log.warning(
-                "[%s] %d facilities matched %r; picked %s (%s). Check the table "
-                "above and edit data/campgrounds.yaml if that's the wrong one.",
-                key,
-                len(matches),
-                park,
-                facility_id,
-                fac_name,
-            )
+        # Parks are split into per-section facilities; watch all of them, or
+        # tiers referencing other sections silently never match.
+        if cg.facility_match:
+            # Explicit facility filter, for parks that contain more than one
+            # physical campground (or to target a specific group camp).
+            chosen = [r for r in matches if cg.facility_match.lower() in r[3].lower()]
+            if not chosen:
+                log.warning(
+                    "[%s] facility_match %r matched none of the %d facilities for "
+                    "%r; leaving IDs untouched. Check the table above.",
+                    key,
+                    cg.facility_match,
+                    len(matches),
+                    park,
+                )
+                continue
+        else:
+            # Group camps are a different product (one shared unit, no
+            # pairs), so they are left out unless they're all there is.
+            regular = [r for r in matches if "group" not in r[3].lower()]
+            chosen = regular or matches
+        park, place_id, facility_id, fac_name = chosen[0]
         entry["place_id"] = place_id
         entry["facility_id"] = facility_id
+        entry["facility_ids"] = [r[2] for r in chosen]
         updated += 1
-        log.info("[%s] place_id=%s facility_id=%s (%s)", key, place_id, facility_id, fac_name)
+        log.info(
+            "[%s] place_id=%s facility_ids=%s (%s)",
+            key,
+            place_id,
+            ",".join(r[2] for r in chosen),
+            "; ".join(r[3] for r in chosen),
+        )
+        for r in matches:
+            if r not in chosen:
+                log.info("[%s] skipped facility %s (%s)", key, r[2], r[3])
 
     if not updated:
         log.warning("no configured campground matched a discovered park name; nothing written")
@@ -243,21 +265,23 @@ def cmd_sites(args: argparse.Namespace, config: Config) -> int:
         return 2
 
     client = _client(config)
+    sites = []
     try:
-        sites = client.list_sites(cg.facility_id)
+        for facility_id in cg.facility_ids:
+            sites.extend(client.list_sites(facility_id))
     except ReserveCaliforniaError as exc:
         log.error("site lookup failed: %s", exc)
         return 2
 
     if not sites:
-        log.warning("facility %s returned no sites", cg.facility_id)
+        log.warning("facilities %s returned no sites", ",".join(cg.facility_ids))
         return 1
 
     scored = cg.desirability.score_all(sites)
     sites.sort(key=lambda s: (s.number if s.number is not None else 10**9, s.name))
     located = sum(1 for s in sites if s.has_coords)
 
-    print(f"\n{cg.name} — facility {cg.facility_id} — {len(sites)} sites "
+    print(f"\n{cg.name} — facilities {','.join(cg.facility_ids)} — {len(sites)} sites "
           f"({located} with coordinates)\n")
     print(f"{'SITE':<12} {'UNIT ID':>9} {'SCORE':>5}  {'ADA':<4} {'LAT,LON':<24} WHY")
     print("-" * 100)

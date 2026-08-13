@@ -124,18 +124,50 @@ def scan(
             continue
 
         stats["campgrounds_attempted"] += 1
-        try:
-            sites, free = client.availability(
-                campground.facility_id, horizon_start, horizon_end
-            )
-        except ReserveCaliforniaError as exc:
+        # A park may span several facilities (sections); merge their grids so
+        # tiers and adjacency see the whole campground.
+        sites = {}
+        free = {}
+        failed: list[str] = []
+        for facility_id in campground.facility_ids:
+            try:
+                fac_sites, fac_free = client.availability(
+                    facility_id, horizon_start, horizon_end
+                )
+            except ReserveCaliforniaError as exc:
+                failed.append(f"facility {facility_id}: {exc}")
+                continue
+            for unit_id, s in fac_sites.items():
+                sites.setdefault(unit_id, s)
+            for unit_id, nights in fac_free.items():
+                free.setdefault(unit_id, set()).update(nights)
+
+        if failed and not sites:
             # One flaky park should not abort the whole run.
-            log.error("[%s] availability lookup failed: %s", campground.key, exc)
-            stats["errors"].append(f"{campground.key}: {exc}")
+            log.error("[%s] availability lookup failed: %s", campground.key, "; ".join(failed))
+            stats["errors"].append(f"{campground.key}: {'; '.join(failed)}")
             continue
+        if failed:
+            # Partial coverage is worth alerting from, but never silently.
+            log.warning("[%s] partial scan — %s", campground.key, "; ".join(failed))
+            stats["errors"].append(f"{campground.key} (partial): {'; '.join(failed)}")
 
         stats["campgrounds_ok"] += 1
         stats["sites_checked"] += len(sites)
+        # The Tyler-hosted backend zeroes MapInfo lat/lon (verified 2026-08),
+        # so a geo rule can silently never fire. Say so out loud: a campground
+        # scored only by geo would otherwise look permanently unavailable.
+        if (
+            campground.desirability.geo is not None
+            and sites
+            and not any(s.has_coords for s in sites.values())
+        ):
+            log.warning(
+                "[%s] geo rule is inert — API returned no coordinates for any "
+                "of %d sites; only `default` and `tiers` scores apply",
+                campground.key,
+                len(sites),
+            )
         log.info("[%s] %d sites returned", campground.key, len(sites))
         min_score = campground.min_score if campground.min_score is not None else config.min_score
         hits = find_pairs_for_campground(

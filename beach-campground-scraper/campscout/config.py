@@ -62,6 +62,11 @@ class Campground:
     city: str = ""
     place_id: Optional[str] = None
     facility_id: Optional[str] = None
+    facility_ids: list = field(default_factory=list)
+    # Substring filter on facility names during `discover --write`, for parks
+    # whose name matches more than one physical campground (San Onofre SB is
+    # both Bluff Camp and San Mateo Camp, with overlapping site numbers).
+    facility_match: str = ""
     enabled: bool = True
     notes: str = ""
     map_url: str = ""
@@ -72,18 +77,28 @@ class Campground:
 
     @property
     def configured(self) -> bool:
-        """Facility ID is what the availability API actually needs."""
-        return bool(self.facility_id)
+        """Facility IDs are what the availability API actually needs."""
+        return bool(self.facility_ids)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Campground":
+        # Parks are often split into several ReserveCalifornia "facilities"
+        # (San Elijo is three sections), and watching only one silently misses
+        # the rest, so a campground carries every facility that composes it.
+        # `facility_id` (singular) is accepted as a one-element shorthand and
+        # kept as "the first" for booking links and display.
+        ids = [str(i) for i in (raw.get("facility_ids") or []) if i]
+        if not ids and raw.get("facility_id"):
+            ids = [str(raw["facility_id"])]
         return cls(
             key=str(raw["key"]),
             name=str(raw.get("name", raw["key"])),
             park=str(raw.get("park", "")),
             city=str(raw.get("city", "")),
             place_id=str(raw["place_id"]) if raw.get("place_id") else None,
-            facility_id=str(raw["facility_id"]) if raw.get("facility_id") else None,
+            facility_id=ids[0] if ids else None,
+            facility_ids=ids,
+            facility_match=str(raw.get("facility_match", "")),
             enabled=bool(raw.get("enabled", True)),
             notes=str(raw.get("notes", "")).strip(),
             map_url=str(raw.get("map_url", "")),
