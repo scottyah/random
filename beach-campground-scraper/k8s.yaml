@@ -1,0 +1,305 @@
+# campscout on Kubernetes — template. Search for CHANGEME before applying.
+#
+#   kubectl apply -f k8s.yaml
+#
+# Ships a CronJob (default) plus a Deployment alternative at the bottom.
+# Use one or the other, not both — they share a ReadWriteOnce volume.
+#
+# ── Before you apply ────────────────────────────────────────────────────
+# Facility IDs must be resolved first. Discovery writes a file, and the
+# ConfigMap below is mounted read-only, so it is a bootstrap step rather
+# than something the running pod does:
+#
+#   python -m campscout discover          # locally, no --write
+#
+# then paste the resulting IDs into the campgrounds.yaml ConfigMap below.
+# Without them every scan reaches zero campgrounds, exits non-zero, and the
+# Job is marked failed — loudly, rather than sitting green and silent.
+# ────────────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: campscout
+---
+# Persistent state: the alert dedupe table and the heartbeat.
+#
+# This is not optional. On ephemeral storage the dedupe table resets on every
+# run, so a single open pair re-alerts every 10 minutes forever, and `status`
+# can never tell you whether scans are actually happening.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: campscout-state
+  namespace: campscout
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 128Mi
+  # storageClassName: CHANGEME-if-your-cluster-has-no-default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: campscout-config
+  namespace: campscout
+data:
+  config.yaml: |
+    search:
+      min_score: 85
+      horizon_days: 180
+      windows:
+        - label: weekend
+          nights: 2
+          weekdays: [4]          # Mon=0, so 4 = Friday check-in
+        - label: long weekend
+          nights: 3
+          weekdays: [4]
+
+    cooldown_hours: 12
+    stale_after_hours: 3
+
+    request:
+      timeout: 30
+      min_interval: 1.0
+      max_retries: 3
+
+    paths:
+      state: /var/lib/campscout/state.json
+      cache: /var/lib/campscout/cache
+
+    heartbeat:
+      url: ${CAMPSCOUT_HEARTBEAT_URL}
+
+    notifiers:
+      - type: ntfy
+        topic: ${NTFY_TOPIC}
+        priority: high
+      # - type: email
+      #   host: smtp.gmail.com
+      #   port: 587
+      #   username: ${SMTP_USERNAME}
+      #   password: ${SMTP_PASSWORD}
+      #   sender: ${SMTP_USERNAME}
+      #   recipients: ["CHANGEME@example.com"]
+
+  # Paste the IDs from `campscout discover` here. Everything else — the
+  # desirability tiers and adjacency rules — is carried in the image; only
+  # the IDs need filling in.
+  campgrounds.yaml: |
+    campgrounds:
+      - key: san_elijo
+        name: San Elijo State Beach
+        park: San Elijo SB
+        enabled: true
+        place_id: "CHANGEME"
+        facility_id: "CHANGEME"
+        desirability:
+          default: 15
+          tiers:
+            - {score: 100, label: bluff-front north, sites: "145-171"}
+            - {score: 90, label: ocean side, sites: "1-43"}
+            - {score: 75, label: ocean side outer row, sites: "47,49,51,54,56"}
+            - {score: 45, label: full hookup inland, sites: "101-108,111-116"}
+          exclude:
+            sites: "94,128"        # hike-and-bike, group site
+          geo:
+            mode: west_percentile
+            percentile: 35
+            score: 95
+        adjacency:
+          mode: either
+          max_meters: 35
+          groups: ["1-43", "44-99", "101-144", "145-171"]
+
+      - key: south_carlsbad
+        name: South Carlsbad State Beach
+        park: South Carlsbad SB
+        enabled: true
+        place_id: "CHANGEME"
+        facility_id: "CHANGEME"
+        desirability:
+          default: 20
+          geo:
+            mode: west_percentile
+            percentile: 40
+            score: 100
+        adjacency:
+          mode: either
+          max_meters: 35
+---
+# Secrets are referenced as ${VAR} in the ConfigMap above and expanded from
+# the environment at load time, so they never appear in the ConfigMap itself.
+#
+# Prefer creating this from the CLI over committing it:
+#   kubectl create secret generic campscout-secrets -n campscout \
+#     --from-literal=NTFY_TOPIC='sd-camping-<something-unguessable>' \
+#     --from-literal=CAMPSCOUT_HEARTBEAT_URL='https://hc-ping.com/<uuid>'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: campscout-secrets
+  namespace: campscout
+type: Opaque
+stringData:
+  NTFY_TOPIC: "CHANGEME-pick-something-unguessable"
+  # An outside service that alerts YOU when these pings stop. Without it, a
+  # cluster that stops running this looks exactly like a booked-out campground.
+  CAMPSCOUT_HEARTBEAT_URL: "CHANGEME-https://hc-ping.com/your-uuid"
+  # SMTP_USERNAME: "CHANGEME"
+  # SMTP_PASSWORD: "CHANGEME"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: campscout
+  namespace: campscout
+spec:
+  schedule: "*/10 * * * *"
+  # The PVC is ReadWriteOnce and two concurrent scans would race on the state
+  # file, so overlapping runs must be prevented rather than queued.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # Don't let a wedged pod straddle the next scheduled run.
+      activeDeadlineSeconds: 540
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: campscout
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: campscout
+              image: CHANGEME/campscout:latest
+              imagePullPolicy: IfNotPresent
+              args: ["scan"]
+              envFrom:
+                - secretRef:
+                    name: campscout-secrets
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/campscout
+                  readOnly: true
+                - name: state
+                  mountPath: /var/lib/campscout
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: config
+              configMap:
+                name: campscout-config
+            - name: state
+              persistentVolumeClaim:
+                claimName: campscout-state
+            # readOnlyRootFilesystem is on, so anything writing to /tmp needs this.
+            - name: tmp
+              emptyDir: {}
+---
+# ── Alternative: long-running Deployment ────────────────────────────────
+# Use this INSTEAD of the CronJob above if you'd rather have one pod polling
+# in-process. Delete the CronJob first — they share a ReadWriteOnce PVC and
+# would otherwise fight over it.
+#
+# Trade-off: the CronJob leaves nothing running between scans and gets
+# restart/backoff semantics from the Job controller. The Deployment holds the
+# volume continuously and its liveness probe restarts it when scans go stale.
+#
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: campscout
+#   namespace: campscout
+# spec:
+#   replicas: 1
+#   # Two replicas would double-alert and race the state file. Recreate keeps
+#   # the old pod from holding the RWO volume during a rollout.
+#   strategy:
+#     type: Recreate
+#   selector:
+#     matchLabels:
+#       app: campscout
+#   template:
+#     metadata:
+#       labels:
+#         app: campscout
+#     spec:
+#       securityContext:
+#         runAsNonRoot: true
+#         runAsUser: 10001
+#         runAsGroup: 10001
+#         fsGroup: 10001
+#         seccompProfile:
+#           type: RuntimeDefault
+#       # watch handles SIGTERM and finishes its current pass before exiting.
+#       terminationGracePeriodSeconds: 60
+#       containers:
+#         - name: campscout
+#           image: CHANGEME/campscout:latest
+#           args: ["watch"]
+#           envFrom:
+#             - secretRef:
+#                 name: campscout-secrets
+#           securityContext:
+#             allowPrivilegeEscalation: false
+#             readOnlyRootFilesystem: true
+#             capabilities:
+#               drop: ["ALL"]
+#           # --check reports staleness only. Plain `status` would also fail on
+#           # "nothing scheduled" — true inside a Deployment, where there is no
+#           # cron — and restart-loop a perfectly healthy pod.
+#           livenessProbe:
+#             exec:
+#               command: ["python", "-m", "campscout", "status", "--check"]
+#             initialDelaySeconds: 120
+#             periodSeconds: 300
+#             failureThreshold: 2
+#           resources:
+#             requests:
+#               cpu: 25m
+#               memory: 64Mi
+#             limits:
+#               cpu: 500m
+#               memory: 256Mi
+#           volumeMounts:
+#             - name: config
+#               mountPath: /etc/campscout
+#               readOnly: true
+#             - name: state
+#               mountPath: /var/lib/campscout
+#             - name: tmp
+#               mountPath: /tmp
+#       volumes:
+#         - name: config
+#           configMap:
+#             name: campscout-config
+#         - name: state
+#           persistentVolumeClaim:
+#             claimName: campscout-state
+#         - name: tmp
+#           emptyDir: {}

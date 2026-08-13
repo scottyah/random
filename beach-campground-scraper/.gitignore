@@ -1,0 +1,12 @@
+# Local settings, may contain SMTP passwords / webhook URLs
+config.yaml
+
+# Runtime state and caches
+data/state.json
+data/cache/
+data/sites/
+
+.venv/
+__pycache__/
+*.py[cod]
+.env
