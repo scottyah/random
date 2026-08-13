@@ -106,6 +106,53 @@ heartbeat:
 Without this, a powered-off server is indistinguishable from a fully-booked
 campground. `status` warns when it isn't configured.
 
+## Docker / Kubernetes
+
+```bash
+docker build -t campscout:latest .
+
+docker run --rm \
+  -v campscout-state:/var/lib/campscout \
+  -v $PWD/config.yaml:/etc/campscout/config.yaml:ro \
+  campscout:latest scan
+```
+
+The image runs as UID 10001, needs no writable root filesystem, and reads its
+paths from `CAMPSCOUT_CONFIG` / `CAMPSCOUT_CAMPGROUNDS` so both files can come
+from read-only mounts. `scan` is the default command; pass `watch` for a
+long-running container (it handles SIGTERM and finishes the current pass, so
+`docker stop` is clean rather than a 10-second wait for SIGKILL).
+
+For Kubernetes, `k8s.yaml` is a template — grep for `CHANGEME`:
+
+```bash
+python -m campscout discover        # locally, note the IDs
+# paste them into the campgrounds.yaml ConfigMap in k8s.yaml
+kubectl apply -f k8s.yaml
+kubectl -n campscout logs -l app=campscout --tail=50
+```
+
+It ships a CronJob (every 10 min) plus a commented Deployment alternative for
+in-process `watch`. Use one or the other — they share a ReadWriteOnce volume.
+
+Three things in there are load-bearing rather than boilerplate:
+
+- **The PVC is not optional.** State holds the alert dedupe table. On ephemeral
+  storage it resets every run, so one open pair re-alerts every 10 minutes
+  forever, and `status` can never tell you whether scans are happening.
+- **`concurrencyPolicy: Forbid`.** Two overlapping scans race the state file on
+  a ReadWriteOnce volume.
+- **The liveness probe uses `status --check`, not plain `status`.** A Deployment
+  has no cron or systemd timer, so plain `status` would report "nothing
+  scheduled", exit non-zero, and restart-loop a perfectly healthy pod.
+
+A scan that reaches zero campgrounds now exits non-zero, so the most likely
+misconfiguration — leaving `CHANGEME` in the facility IDs — surfaces as a failed
+Job instead of a green one that quietly never checks anything.
+
+Discovery is a bootstrap step, not a runtime one: it writes a file, and the
+ConfigMap is mounted read-only. Run it locally and paste the IDs in.
+
 ### Step 1 is required
 
 `place_id` and `facility_id` ship as `null` on purpose. I built this in an
@@ -258,7 +305,7 @@ want to talk through credential storage first.
 python -m unittest discover -s tests
 ```
 
-63 tests, no network. Because the live API was unreachable while building this,
+76 tests, no network. Because the live API was unreachable while building this,
 `tests/test_end_to_end.py` runs the whole pipeline — grid parsing, scoring,
 adjacency, dedupe, message formatting — against a stubbed backend with a
 realistic payload, including the fallback path where the API returns no

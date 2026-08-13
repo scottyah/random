@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
+import signal
 import sys
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -167,15 +170,19 @@ def cmd_discover(args: argparse.Namespace, config: Config) -> int:
     print()
 
     if args.write:
-        return _write_discovered_ids(rows, config)
+        return _write_discovered_ids(rows, config, args.campgrounds)
 
     print("Re-run with --write to save matching IDs into data/campgrounds.yaml.")
     return 0
 
 
-def _write_discovered_ids(rows: list[tuple[str, str, str, str]], config: Config) -> int:
+def _write_discovered_ids(
+    rows: list[tuple[str, str, str, str]],
+    config: Config,
+    campgrounds_path: Optional[Path] = None,
+) -> int:
     """Match discovered facilities to configured campgrounds by park name."""
-    path = Path(DEFAULT_CAMPGROUNDS)
+    path = Path(campgrounds_path or DEFAULT_CAMPGROUNDS)
     with path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
 
@@ -212,8 +219,18 @@ def _write_discovered_ids(rows: list[tuple[str, str, str, str]], config: Config)
         log.warning("no configured campground matched a discovered park name; nothing written")
         return 1
 
-    with path.open("w", encoding="utf-8") as fh:
-        yaml.safe_dump(raw, fh, sort_keys=False, allow_unicode=True, width=100)
+    try:
+        with path.open("w", encoding="utf-8") as fh:
+            yaml.safe_dump(raw, fh, sort_keys=False, allow_unicode=True, width=100)
+    except OSError as exc:
+        # Typical in Kubernetes: campgrounds.yaml came from a read-only
+        # ConfigMap mount. Discovery is a bootstrap step, not a runtime one.
+        log.error("could not write %s: %s", path, exc)
+        log.error(
+            "If this path is a read-only mount, run `discover` without --write, "
+            "then paste the IDs into your ConfigMap."
+        )
+        return 2
     log.info("wrote %d campground ID(s) to %s", updated, path)
     return 0
 
@@ -282,7 +299,15 @@ def cmd_sites(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
-def _run_once(config: Config, notifiers, state: AlertState, dry_run: bool) -> list[PairHit]:
+def _run_once(
+    config: Config, notifiers, state: AlertState, dry_run: bool
+) -> tuple[list[PairHit], bool]:
+    """Run one pass. Returns (hits, healthy).
+
+    `healthy` is False when the run genuinely failed, as distinct from
+    succeeding and finding nothing. Callers turn that into an exit code, which
+    is what makes a broken CronJob show up as failed instead of quietly green.
+    """
     heartbeat = build_heartbeat(config.heartbeat)
 
     # Warn before scanning if the last successful run is old: the gap itself is
@@ -315,7 +340,7 @@ def _run_once(config: Config, notifiers, state: AlertState, dry_run: bool) -> li
         state.save()
         if heartbeat.enabled:
             heartbeat.failure()
-        return []
+        return [], False
 
     state.record_run(
         ok=True,
@@ -347,13 +372,18 @@ def _run_once(config: Config, notifiers, state: AlertState, dry_run: bool) -> li
     state.save()
     if heartbeat.enabled:
         heartbeat.success()
-    return hits
+    return hits, True
 
 
 def cmd_scan(args: argparse.Namespace, config: Config) -> int:
     state = AlertState(config.state_path, config.cooldown_hours)
     notifiers = build_notifiers(config.notifiers)
-    hits = _run_once(config, notifiers, state, args.dry_run)
+    hits, healthy = _run_once(config, notifiers, state, args.dry_run)
+
+    # A run that reached nothing is a real failure: exit non-zero so a k8s Job
+    # is marked failed and a misconfigured deploy doesn't sit green forever.
+    if not healthy:
+        return 1
     # "Nothing available" is the normal outcome, not an error: exiting non-zero
     # here would make cron mail you a failure every single quiet run.
     if not hits and args.fail_if_none:
@@ -368,22 +398,36 @@ def cmd_watch(args: argparse.Namespace, config: Config) -> int:
     if interval != config.poll_seconds:
         log.warning("poll_seconds raised to %ds to stay polite to the API", interval)
 
-    log.info("watching every %ds — Ctrl-C to stop", interval)
-    while True:
+    # As PID 1 in a container Python gets no default SIGTERM action, so without
+    # this `docker stop` / a k8s pod eviction would stall until SIGKILL.
+    stop = threading.Event()
+
+    def _handle(signum, _frame):
+        log.info("received %s, finishing current pass then exiting", signal.Signals(signum).name)
+        stop.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except ValueError:  # not on the main thread
+            pass
+
+    log.info("watching every %ds — SIGTERM or Ctrl-C to stop", interval)
+    while not stop.is_set():
         started = time.monotonic()
         try:
             _run_once(config, notifiers, state, args.dry_run)
-        except KeyboardInterrupt:
-            raise
         except Exception as exc:  # noqa: BLE001 - a watcher must not die on one bad pass
             log.exception("scan pass failed: %s", exc)
 
         # Jitter so repeated runs don't hit the API on a predictable beat.
         sleep_for = max(0.0, interval - (time.monotonic() - started)) + random.uniform(0, 30)
-        try:
-            time.sleep(sleep_for)
-        except KeyboardInterrupt:
-            raise
+        # Interruptible sleep: a stop signal shouldn't wait out the interval.
+        if stop.wait(sleep_for):
+            break
+
+    log.info("stopped cleanly")
+    return 0
 
 
 def _ago(seconds: Optional[float]) -> str:
@@ -449,6 +493,16 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
     runs = state.runs
     age = state.seconds_since_success()
     stale = state.is_stale(config.stale_after_hours)
+
+    # Probe mode: staleness only, one line, no setup advice. A k8s Deployment
+    # running `watch` has no cron or systemd timer, so the scheduling check
+    # would fail forever and restart-loop a perfectly healthy pod.
+    if getattr(args, "check", False):
+        if stale:
+            print(f"STALE: last successful scan {_ago(age)}")
+            return 1
+        print(f"OK: last successful scan {_ago(age)}")
+        return 0
 
     if age is None:
         verdict = "NOT RUNNING — no successful scan has ever completed"
@@ -549,7 +603,21 @@ def build_parser() -> argparse.ArgumentParser:
         prog="campscout",
         description="Watch North County San Diego beach campgrounds for adjacent open sites.",
     )
-    parser.add_argument("-c", "--config", type=Path, help="path to config.yaml")
+    # Paths are also settable by env var so a container can point at mounted
+    # ConfigMaps without rewriting the command line.
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=os.environ.get("CAMPSCOUT_CONFIG") or None,
+        help="path to config.yaml (env: CAMPSCOUT_CONFIG)",
+    )
+    parser.add_argument(
+        "--campgrounds",
+        type=Path,
+        default=os.environ.get("CAMPSCOUT_CAMPGROUNDS") or None,
+        help="path to campgrounds.yaml (env: CAMPSCOUT_CAMPGROUNDS)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -588,6 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("status", help="is it actually running? when did it last check?")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="probe mode: one line, exit non-zero only if scans are stale "
+        "(for k8s liveness probes and healthchecks)",
+    )
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("test-notify", help="send a fake alert to check your notifier setup")
@@ -602,7 +676,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     _setup_logging(args.verbose)
 
     try:
-        config = load_config(config_path=args.config)
+        config = load_config(config_path=args.config, campgrounds_path=args.campgrounds)
     except (OSError, ValueError, KeyError) as exc:
         log.error("could not load config: %s", exc)
         return 2
